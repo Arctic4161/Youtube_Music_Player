@@ -1,6 +1,6 @@
 ## About Youtube Music Player
 
-**Youtube Music Player** Is a program that searches Youtube, downloads the audio, and plays the audio as a player.
+**Youtube Music Player** Is a program built in python 3.12 that searches Youtube, downloads the audio, and plays the audio as a player.
 <hr>
 
 ## Installation
