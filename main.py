@@ -1,6 +1,9 @@
 from __future__ import unicode_literals
 import contextlib
 import os
+os.environ["KIVY_NO_CONSOLELOG"] = "1"
+os.environ['KIVY_IMAGE'] = 'pil'
+os.environ['KIVY_AUDIO'] = 'gstplayer'
 import random
 import shutil
 import time
@@ -8,6 +11,8 @@ import urllib.request
 from threading import Thread
 from kivy.clock import Clock
 from kivy.config import Config
+Config.set('input', 'mouse', 'mouse,disable_multitouch')
+Config.set('kivy', 'keyboard_mode', 'system')
 from kivy.core.audio import SoundLoader
 from kivy.properties import StringProperty, ObjectProperty
 from kivy.uix.boxlayout import BoxLayout
@@ -20,13 +25,6 @@ from kivymd.uix.slider import MDSlider
 from pytube.helpers import safe_filename
 from youtubesearchpython import VideosSearch
 import yt_dlp
-
-# Packaging for Android
-os.environ["KIVY_NO_CONSOLELOG"] = "1"
-os.environ['KIVY_IMAGE'] = 'pil'
-os.environ['KIVY_AUDIO'] = 'gstplayer'
-Config.set('input', 'mouse', 'mouse,disable_multitouch')
-Config.set('kivy', 'keyboard_mode', 'system')
 
 
 class RecycleViewRow(BoxLayout):
@@ -63,6 +61,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     play_btt = ObjectProperty(None)
     pause_btt = ObjectProperty(None)
     song_position = ObjectProperty(None)
+    image_path = StringProperty(os.path.join(os.path.dirname(__file__), 'music.png'))
     slider = None
     setbyslider = False
     link = None
@@ -72,9 +71,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     settitle = None
     repeatselected = False
     directory = os.getcwd()
-    os.makedirs(directory + "//" + "downloaded" + "//" + "Played", exist_ok=True)
-    setlocaldownload = directory + "//" + "downloaded" + "//" + "Played"
-    history = setlocaldownload + "//" + "history_log"
+    setlocaldownload = f'{directory}//downloaded//Played'
+    os.makedirs(setlocaldownload, exist_ok=True)
+    history = f'{setlocaldownload}//history_log'
     with open(history, 'w') as f:
         f.write('')
     updater = None
@@ -310,21 +309,21 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         else:
             loadingfile = Thread(target=GUILayout.loadfile)
             loadingfile.start()
-        GUILayout.loadingfile = Clock.schedule_interval(GUILayout.waitingforload, 1)
+        GUILayout.loadingfiletimer = Clock.schedule_interval(GUILayout.waitingforload, 1)
 
     @staticmethod
     def waitingforload(dt):
         if GUILayout.fileloaded is True:
             GUILayout.stream = GUILayout.filetoplay
             GUILayout.fileloaded = False
-            GUILayout.loadingfile.cancel()
+            GUILayout.loadingfiletimer.cancel()
             GUILayout.playing()
         elif GUILayout.fileloaded is False:
             pass
         elif GUILayout.fileloaded is None:
             GUILayout.fileloaded = False
-            GUILayout.loadingfile.cancel()
-            GUILayout.stop()
+            GUILayout.loadingfiletimer.cancel()
+            GUILayout.stop_playing()
 
     @staticmethod
     def playing():
@@ -397,11 +396,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if GUILayout.repeatselected is True:
             GUILayout.repeatselected = False
             MDApp.get_running_app().root.ids.repeat_btt.text_color = 0, 0, 0, 1
-            GUILayout.repeatsong()
+            GUILayout.repeat_song()
         elif GUILayout.repeatselected is False:
             MDApp.get_running_app().root.ids.repeat_btt.text_color = 1, 0, 0, 1
             GUILayout.repeatselected = True
-            GUILayout.repeatsong()
+            GUILayout.repeat_song()
 
     @staticmethod
     def repeat_song():
@@ -479,8 +478,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 class Musicapp(MDApp):
     def build(self):
         self.title = 'Youtube Music Player'
-        application_path = os.path.dirname(__file__)
-        icon = os.path.join(application_path + '\music.png')
+        icon = os.path.join(os.path.dirname(__file__), 'music.png')
         self.icon = icon
         self.theme_cls.theme_style = "Light"
         self.theme_cls.primary_palette = "Green"
