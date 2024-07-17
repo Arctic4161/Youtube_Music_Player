@@ -1,9 +1,11 @@
 from __future__ import unicode_literals
 import contextlib
 import os
-os.environ["KIVY_NO_CONSOLELOG"] = "1"
+
+# os.environ["KIVY_NO_CONSOLELOG"] = "1"
 os.environ['KIVY_IMAGE'] = 'pil'
 os.environ['KIVY_AUDIO'] = 'gstplayer'
+
 import random
 import shutil
 import time
@@ -279,22 +281,25 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     @staticmethod
     def loadfile():
-        ydl_opts = {'format': 'bestaudio/best',
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }],
-                }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download(GUILayout.setytlink)
-        files = [f for f in os.listdir('.') if os.path.isfile(f)]
-        for f in files:
-            if f.endswith(".mp3"):
-                shutil.move(f, f"{GUILayout.setlocaldownload}//{GUILayout.settitle}.mp3")
-        urllib.request.urlretrieve(GUILayout.setlocal,
-                                   f"{GUILayout.setlocaldownload}//{GUILayout.settitle}.jpg")
-        GUILayout.fileloaded = True
+        try:
+            ydl_opts = {'format': 'bestaudio/best',
+                        'postprocessors': [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '192',
+                        }],
+                    }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download(GUILayout.setytlink)
+            files = [f for f in os.listdir('.') if os.path.isfile(f)]
+            for f in files:
+                if f.endswith(".mp3"):
+                    shutil.move(f, f"{GUILayout.setlocaldownload}//{GUILayout.settitle}.mp3")
+            urllib.request.urlretrieve(GUILayout.setlocal,
+                                       f"{GUILayout.setlocaldownload}//{GUILayout.settitle}.jpg")
+            GUILayout.fileloaded = True
+        except Exception:
+            GUILayout.fileloaded = False
 
     @staticmethod
     def checkfile():
