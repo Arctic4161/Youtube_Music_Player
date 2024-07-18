@@ -1,10 +1,13 @@
-from __future__ import unicode_literals
 import contextlib
 import os
 
-# os.environ["KIVY_NO_CONSOLELOG"] = "1"
+os.environ["KIVY_NO_CONSOLELOG"] = "1"
 os.environ['KIVY_IMAGE'] = 'pil'
 os.environ['KIVY_AUDIO'] = 'gstplayer'
+
+#pyinstaller/installer
+os.environ['GST_PLUGIN_PATH_1_0'] = os.path.dirname(__file__)
+os.environ['GST_PLUGIN_SYSTEM_PATH_1_0'] = os.path.dirname(__file__)
 
 import random
 import shutil
@@ -282,7 +285,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     @staticmethod
     def loadfile():
         try:
-            ydl_opts = {'format': 'bestaudio/best',
+            MDApp.get_running_app().root.ids.song_position.text = (
+                "Downloading and Extracting audio"
+            )
+            # Remove FFmpeg location if running from IDE. Make sure FFmpeg and FFprobe are on Path
+            ydl_opts = {'ffmpeg_location': os.path.join(os.path.dirname(__file__), 'prerequisites', 'bin'),
+                'format': 'bestaudio',
                         'postprocessors': [{
                             'key': 'FFmpegExtractAudio',
                             'preferredcodec': 'mp3',
@@ -469,15 +477,18 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def previous(self):
         GUILayout.paused = False
-        if GUILayout.sound is not None:
-            GUILayout.stop()
-        GUILayout.count = GUILayout.count - 1
-        GUILayout.count = max(GUILayout.count, 0)
-        if GUILayout.playlist is False:
-            self.retrieve_text()
+        if GUILayout.sound.get_pos() >= 20:
+            self.sound.seek(0)
         else:
-            GUILayout.songchange = False
-            GUILayout.retrieving_song()
+            if GUILayout.sound is not None:
+                GUILayout.stop()
+            GUILayout.count = GUILayout.count - 1
+            GUILayout.count = max(GUILayout.count, 0)
+            if GUILayout.playlist is False:
+                self.retrieve_text()
+            else:
+                GUILayout.songchange = False
+                GUILayout.retrieving_song()
 
 
 class Musicapp(MDApp):
