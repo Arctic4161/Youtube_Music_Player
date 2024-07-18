@@ -76,7 +76,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     settitle = None
     repeatselected = False
     directory = os.getcwd()
-    setlocaldownload = f'{directory}//downloaded//Played'
+    if os.name == 'nt':
+        setlocaldownload = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded', 'Played')
+    else:
+        setlocaldownload = f'{directory}//Downloaded//Played'
     os.makedirs(setlocaldownload, exist_ok=True)
     history = f'{setlocaldownload}//history_log'
     with open(history, 'w') as f:

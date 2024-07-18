@@ -6,7 +6,7 @@
 ## Installation
 
 The installation is pretty easy.
-1. Head over to the [Releases](https://github.com/Arctic4161/Youtube_Music_Player/releases) section and download the latest release.
+1. Head over to the [Releases](https://github.com/Arctic4161/Youtube_Music_Player/releases) section and download the latest release and run the installer.
 <hr>
 
 ## Dependencies
