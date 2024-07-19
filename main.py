@@ -260,7 +260,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             GUILayout.result = GUILayout.videossearch.result()
             GUILayout.result1 = GUILayout.result["result"]
             GUILayout.resultsloaded = True
-        resultdict = GUILayout.result1[GUILayout.count]
+        try:
+            resultdict = GUILayout.result1[GUILayout.count]
+        except IndexError:
+            GUILayout.count = 0
+            resultdict = GUILayout.result1[GUILayout.count]
         GUILayout.setytlink = resultdict['link']
         thumbnail = resultdict['thumbnails']
         GUILayout.setlocal = thumbnail[0]['url']
@@ -288,8 +292,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     @staticmethod
     def loadfile():
         try:
+            MDApp.get_running_app().root.ids.next_btt.disabled = True
+            MDApp.get_running_app().root.ids.previous_btt.disabled = True
             MDApp.get_running_app().root.ids.song_position.text = (
-                "Downloading and Extracting audio"
+                "Downloading and Extracting audio... Please wait"
             )
             # Remove FFmpeg location if running from IDE. Make sure FFmpeg and FFprobe are on Path
             ydl_opts = {'ffmpeg_location': os.path.join(os.path.dirname(__file__), 'prerequisites', 'bin'),
@@ -309,7 +315,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             urllib.request.urlretrieve(GUILayout.setlocal,
                                        f"{GUILayout.setlocaldownload}//{GUILayout.settitle}.jpg")
             GUILayout.fileloaded = True
+            MDApp.get_running_app().root.ids.next_btt.disabled = False
+            MDApp.get_running_app().root.ids.previous_btt.disabled = False
         except Exception:
+            MDApp.get_running_app().root.ids.next_btt.disabled = False
+            MDApp.get_running_app().root.ids.previous_btt.disabled = False
             GUILayout.fileloaded = False
 
     @staticmethod
@@ -480,18 +490,18 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def previous(self):
         GUILayout.paused = False
-        if GUILayout.sound.get_pos() >= 20:
-            self.sound.seek(0)
-        else:
-            if GUILayout.sound is not None:
-                GUILayout.stop()
-            GUILayout.count = GUILayout.count - 1
-            GUILayout.count = max(GUILayout.count, 0)
-            if GUILayout.playlist is False:
-                self.retrieve_text()
+        if GUILayout.sound is not None:
+            if GUILayout.sound.get_pos() >= 20:
+                self.sound.seek(0)
             else:
-                GUILayout.songchange = False
-                GUILayout.retrieving_song()
+                GUILayout.stop()
+        GUILayout.count = GUILayout.count - 1
+        GUILayout.count = max(GUILayout.count, 0)
+        if GUILayout.playlist is False:
+            self.retrieve_text()
+        else:
+            GUILayout.songchange = False
+            GUILayout.retrieving_song()
 
 
 class Musicapp(MDApp):
@@ -506,4 +516,9 @@ class Musicapp(MDApp):
 
 
 if __name__ == '__main__':
+    python_files = [file for file in os.listdir() if file.endswith(".webm")]
+    # Delete old undownloaded files
+    for file in python_files:
+        os.remove(file)
+    print(os.listdir())
     Musicapp().run()
