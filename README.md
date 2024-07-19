@@ -1,6 +1,9 @@
 ## About Youtube Music Player
 
 **Youtube Music Player** Is a program built in python 3.10 that searches Youtube, downloads the audio, and plays the audio as a player.
+
+![Alt text](../../OneDrive - Michels Corporation/Pictures/2024-07-19_14-47.png)
+
 <hr>
 
 ## Installation
@@ -40,6 +43,26 @@ You can download my release to install all together.
 
 ## A Bit About How It Works
 This program can be used to search youtube. Press the next and previous buttons to scroll through the searches. Press the play button to play the audio. The program will proceed to download the program and add it to your play list and then play the audio. After the play button has been pressed after a search, the next and previous buttons will fuction as next and previous for your playlist.
+<hr>
+
+## Screenshots
+
+<div align="center">
+  <img src="https://github.com/Arctic4161/Youtube_Music_Player/blob/master/Images/2024-07-19_14-07.png?raw=true"
+  title="Youtube Music Player">
+</div>
+<div align="center">
+  <img src="https://github.com/Arctic4161/Youtube_Music_Player/blob/master/Images/2024-07-19_14-42.png?raw=true"
+  title="Youtube Music Player">
+</div>
+<div align="center">
+  <img src="https://github.com/Arctic4161/Youtube_Music_Player/blob/master/Images/2024-07-19_14-44.png?raw=true"
+  title="Youtube Music Player">
+</div>
+<div align="center">
+  <img src="https://github.com/Arctic4161/Youtube_Music_Player/blob/master/Images/2024-07-19_14-44_1.png?raw=true"
+  title="Youtube Music Player">
+</div>
 <hr>
 
 **Not to be used with copyrighted material.**
