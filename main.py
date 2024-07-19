@@ -1,7 +1,7 @@
 import contextlib
 import os
 
-#os.environ["KIVY_NO_CONSOLELOG"] = "1"
+os.environ["KIVY_NO_CONSOLELOG"] = "1"
 os.environ['KIVY_IMAGE'] = 'pil'
 os.environ['KIVY_AUDIO'] = 'gstplayer'
 
