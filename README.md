@@ -22,14 +22,21 @@ The installation is pretty easy.
 |  yt-dlp  |  youtube downloader  |
 |  kivy-deps.gstreamer  |  Audio Streamer  |
 |  youtube-search-python  |  Youtube search function  |
+|  audio_extract  | Extract the audio from mp4 |
 
 Clone the repository, `cd` into the respective directory and run the below command in terminal
 ```console
 pip install -r requirements.txt
 ```
 to install all the internal dependencies that doesn't come inbuilt with python.
-External dependencies will need to be searched for on the web downloaded and installed from their respective sites.
-You can download my release to install all together.
+
+This program requires a custom audio_extract library. If manually installing dependecies you can install the custom 
+dependency using the command below.
+
+```console
+git+https://github.com/Arctic4161/audio-extract.git
+```
+
 <hr>
 
 ## A Bit About How It Works
