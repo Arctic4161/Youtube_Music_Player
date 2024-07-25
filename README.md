@@ -12,7 +12,7 @@ The installation is pretty easy.
 ## Dependencies
 **Youtube Music Player** has some internal dependencies and external dependencies.
 **Internal Dependency** represents *python libraries/modules* the application relies on.
-**External Dependency** represents *external programs* the application relies on.<br>
+<br>
 
 |  Internal Dependency  |  Function  |
 |:--:|:--:|
@@ -22,12 +22,6 @@ The installation is pretty easy.
 |  yt-dlp  |  youtube downloader  |
 |  kivy-deps.gstreamer  |  Audio Streamer  |
 |  youtube-search-python  |  Youtube search function  |
-
-|  External Dependency  |  Function  |
-|:--:|:--:|
-|  ffmpeg  | requirement of yt-dlp |
-|  ffprobe  |  requirement of yt-dlp  |
-|  Gstreamer  |  Plays the audio  |
 
 Clone the repository, `cd` into the respective directory and run the below command in terminal
 ```console
