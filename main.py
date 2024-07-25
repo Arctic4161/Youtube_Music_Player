@@ -1,5 +1,6 @@
 import contextlib
 import os
+import sys
 
 os.environ["KIVY_NO_CONSOLELOG"] = "1"
 os.environ['KIVY_IMAGE'] = 'pil'
@@ -10,9 +11,9 @@ os.environ['GST_PLUGIN_PATH_1_0'] = os.path.dirname(__file__)
 os.environ['GST_PLUGIN_SYSTEM_PATH_1_0'] = os.path.dirname(__file__)
 
 import random
-import shutil
 import time
 import urllib.request
+import yt_dlp
 from threading import Thread
 from kivy.clock import Clock
 from kivy.config import Config
@@ -29,7 +30,20 @@ from kivymd.uix.gridlayout import MDGridLayout
 from kivymd.uix.slider import MDSlider
 from pytube.helpers import safe_filename
 from youtubesearchpython import VideosSearch
-import yt_dlp
+from audio_extract import extract_audio
+
+
+class CustomLogger:
+    def debug(self, msg):
+        # For compatibility with youtube-dl, both debug and info are passed into debug
+        # You can distinguish them by the prefix '[debug] '
+        if not msg.startswith('[debug] '):
+            self.info(msg)
+
+    def info(self, msg):
+        if "[download]" in msg:
+            MDApp.get_running_app().root.ids.info.text = "Downloading and Extracting audio... Please wait\n" \
+                                                         f"{msg[11:]}"
 
 
 class RecycleViewRow(BoxLayout):
@@ -294,32 +308,23 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         try:
             MDApp.get_running_app().root.ids.next_btt.disabled = True
             MDApp.get_running_app().root.ids.previous_btt.disabled = True
-            MDApp.get_running_app().root.ids.song_position.text = (
-                "Downloading and Extracting audio... Please wait"
-            )
-            # Remove FFmpeg location if running from IDE. Make sure FFmpeg and FFprobe are on Path
-            ydl_opts = {'ffmpeg_location': os.path.join(os.path.dirname(__file__), 'prerequisites', 'bin'),
-                'format': 'bestaudio',
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'mp3',
-                            'preferredquality': '192',
-                        }],
-                    }
+            MDApp.get_running_app().root.ids.info.text = "Downloading and Extracting audio... Please wait"
+            ydl_opts = {'format': 'mp4', 'quit': True, 'logger': CustomLogger(),
+                        'ignoreerrors': True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download(GUILayout.setytlink)
-            files = [f for f in os.listdir('.') if os.path.isfile(f)]
+            files = [file for file in os.listdir() if file.endswith(".mp4")]
             for f in files:
-                if f.endswith(".mp3"):
-                    shutil.move(f, f"{GUILayout.setlocaldownload}//{GUILayout.settitle}.mp3")
+                extract_audio(f, f"{GUILayout.setlocaldownload}//{GUILayout.settitle}.mp3")
+                os.remove(f)
             urllib.request.urlretrieve(GUILayout.setlocal,
                                        f"{GUILayout.setlocaldownload}//{GUILayout.settitle}.jpg")
             GUILayout.fileloaded = True
-            MDApp.get_running_app().root.ids.next_btt.disabled = False
-            MDApp.get_running_app().root.ids.previous_btt.disabled = False
         except Exception:
+            MDApp.get_running_app().root.ids.info.text = "Error Downloading Music"
             MDApp.get_running_app().root.ids.next_btt.disabled = False
             MDApp.get_running_app().root.ids.previous_btt.disabled = False
+            MDApp.get_running_app().root.ids.play_btt.disabled = False
             GUILayout.fileloaded = False
 
     @staticmethod
@@ -333,6 +338,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if os.path.isfile(GUILayout.filetoplay):
             GUILayout.fileloaded = True
         else:
+            GUILayout.fileloaded = False
             loadingfile = Thread(target=GUILayout.loadfile)
             loadingfile.start()
         GUILayout.loadingfiletimer = Clock.schedule_interval(GUILayout.waitingforload, 1)
@@ -343,7 +349,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             GUILayout.stream = GUILayout.filetoplay
             GUILayout.fileloaded = False
             GUILayout.loadingfiletimer.cancel()
+            MDApp.get_running_app().root.ids.info.text = ''
             GUILayout.playing()
+            MDApp.get_running_app().root.ids.next_btt.disabled = False
+            MDApp.get_running_app().root.ids.previous_btt.disabled = False
         elif GUILayout.fileloaded is False:
             pass
         elif GUILayout.fileloaded is None:
@@ -516,7 +525,10 @@ class Musicapp(MDApp):
 
 
 if __name__ == '__main__':
-    python_files = [file for file in os.listdir() if file.endswith(".webm")]
+    orig_stdout = sys.stdout
+    sys.stdout = CustomLogger()
+    sys.stdout = orig_stdout
+    python_files = [file for file in os.listdir() if file.endswith(".webm") or file.endswith(".mp4")]
     # Delete old undownloaded files
     for file in python_files:
         os.remove(file)
