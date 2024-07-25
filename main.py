@@ -1,6 +1,5 @@
 import contextlib
 import os
-import sys
 
 os.environ["KIVY_NO_CONSOLELOG"] = "1"
 os.environ['KIVY_IMAGE'] = 'pil'
@@ -525,9 +524,6 @@ class Musicapp(MDApp):
 
 
 if __name__ == '__main__':
-    orig_stdout = sys.stdout
-    sys.stdout = CustomLogger()
-    sys.stdout = orig_stdout
     python_files = [file for file in os.listdir() if file.endswith(".webm") or file.endswith(".mp4")]
     # Delete old undownloaded files
     for file in python_files:
