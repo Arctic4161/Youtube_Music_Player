@@ -52,20 +52,23 @@ class RecycleViewRow(BoxLayout):
 class MySlider(MDSlider):
     sound = ObjectProperty(None)
 
-    def on_touch_up(self, touch):
-        if touch.grab_current != self:
-            return super(MySlider, self).on_touch_up(touch)
-        # call super method and save its return
-        ret_val = super(MySlider, self).on_touch_up(touch)
-        # adjust position of sound
-        seekingsound = GUILayout.slider.max * GUILayout.slider.value_normalized
-        GUILayout.song_position = self.sound.seek(seekingsound)
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos):
+            GUILayout.updater.cancel()  # Stop further event propagation
+        return super(MySlider, self).on_touch_down(touch)
 
-        # if sound is stopped, restart it
-        if GUILayout.playingstate == 'stop':
-            GUILayout.playing()
-        # return the saved return value
-        return ret_val
+    def on_touch_up(self, touch):
+        if self.collide_point(*touch.pos):
+            # adjust position of sound
+            seekingsound = GUILayout.slider.max * GUILayout.slider.value_normalized
+            GUILayout.song_position = self.sound.seek(seekingsound)
+
+            # if sound is stopped, restart it
+            if GUILayout.playingstate == 'stop':
+                GUILayout.playing()
+            # return the saved return value
+            GUILayout.updater()
+        return super(MySlider, self).on_touch_up(touch)
 
 
 class GUILayout(MDFloatLayout, MDGridLayout):
@@ -90,7 +93,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     repeatselected = False
     directory = os.getcwd()
     if os.name == 'nt':
-        setlocaldownload = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded', 'Played')
+        setlocaldownload = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded',
+                                        'Played')
     else:
         setlocaldownload = f'{directory}//Downloaded//Played'
     os.makedirs(setlocaldownload, exist_ok=True)
@@ -209,9 +213,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 songs.remove(current_song)
                 next_song = random.choice(songs)
                 if (
-                    GUILayout.songchange is True
-                    or GUILayout.slider.value <= 5
-                    and not previous_songs
+                        GUILayout.songchange is True
+                        or GUILayout.slider.value <= 5
+                        and not previous_songs
                 ):
                     GUILayout.getting_song(next_song)
                 elif GUILayout.slider.value > 5:
