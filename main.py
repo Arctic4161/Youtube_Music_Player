@@ -1,23 +1,24 @@
 import contextlib
 import os
-
-os.environ["KIVY_NO_CONSOLELOG"] = "1"
+from kivy import platform
+if platform == "win":
+    os.environ["KIVY_NO_CONSOLELOG"] = "1"
 os.environ['KIVY_IMAGE'] = 'pil'
 os.environ['KIVY_AUDIO'] = 'gstplayer'
 
 #pyinstaller/installer
-os.environ['GST_PLUGIN_PATH_1_0'] = os.path.dirname(__file__)
-os.environ['GST_PLUGIN_SYSTEM_PATH_1_0'] = os.path.dirname(__file__)
+#os.environ['GST_PLUGIN_PATH_1_0'] = os.path.dirname(__file__)
+#os.environ['GST_PLUGIN_SYSTEM_PATH_1_0'] = os.path.dirname(__file__)
 
 import random
 import time
 import urllib.request
 import yt_dlp
 from threading import Thread
-from kivy.clock import Clock
 from kivy.config import Config
 Config.set('input', 'mouse', 'mouse,disable_multitouch')
 Config.set('kivy', 'keyboard_mode', 'system')
+from kivy.clock import Clock
 from kivy.core.audio import SoundLoader
 from kivy.properties import StringProperty, ObjectProperty
 from kivy.uix.boxlayout import BoxLayout
@@ -30,6 +31,9 @@ from kivymd.uix.slider import MDSlider
 from pytube.helpers import safe_filename
 from youtubesearchpython import VideosSearch
 from audio_extract import extract_audio
+if platform == "android":
+    from android.permissions import request_permissions, Permission
+    request_permissions([Permission.INTERNET, Permission.ACCESS_NETWORK_STATE, Permission.READ_MEDIA_AUDIO, Permission.FOREGROUND_SERVICE, Permission.MEDIA_CONTENT_CONTROL, Permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK])
 
 
 class CustomLogger:
@@ -92,7 +96,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     settitle = None
     repeatselected = False
     directory = os.getcwd()
-    if os.name == 'nt':
+    if platform == "win":
         setlocaldownload = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded',
                                         'Played')
     else:
