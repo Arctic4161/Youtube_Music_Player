@@ -34,7 +34,7 @@ This program requires a custom audio_extract library. If manually installing dep
 dependency using the command below.
 
 ```console
-git+https://github.com/Arctic4161/audio-extract.git
+pip install git+https://github.com/Arctic4161/audio-extract.git
 ```
 
 <hr>
