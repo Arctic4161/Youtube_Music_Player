@@ -1,6 +1,6 @@
 ## About Youtube Music Player
 
-**Youtube Music Player** Is a program built in python 3.10 that searches Youtube, downloads the audio, and plays the audio as a player.
+**YouTube Music Player** Is a program built in python 3.10 that searches YouTube, downloads the audio, and plays the audio as a player.
 <hr>
 
 ## Installation
@@ -10,7 +10,7 @@ The installation is pretty easy.
 <hr>
 
 ## Dependencies
-**Youtube Music Player** has some internal dependencies and external dependencies.
+**YouTube Music Player** has some internal dependencies and external dependencies.
 **Internal Dependency** represents *python libraries/modules* the application relies on.
 <br>
 
@@ -22,7 +22,6 @@ The installation is pretty easy.
 |  yt-dlp  |  youtube downloader  |
 |  kivy-deps.gstreamer  |  Audio Streamer  |
 |  youtube-search-python  |  Youtube search function  |
-|  audio_extract  | Extract the audio from mp4 |
 
 Clone the repository, `cd` into the respective directory and run the below command in terminal
 ```console
@@ -30,17 +29,11 @@ pip install -r requirements.txt
 ```
 to install all the internal dependencies that doesn't come inbuilt with python.
 
-This program requires a custom audio_extract library. If manually installing dependecies you can install the custom 
-dependency using the command below.
-
-```console
-pip install git+https://github.com/Arctic4161/audio-extract.git
-```
 
 <hr>
 
 ## A Bit About How It Works
-This program can be used to search youtube. Press the next and previous buttons to scroll through the searches. Press the play button to play the audio. The program will proceed to download the program and add it to your play list and then play the audio. After the play button has been pressed after a search, the next and previous buttons will fuction as next and previous for your playlist.
+This program can be used to search YouTube. Press the next and previous buttons to scroll through the searches. Press the play button to play the audio. The program will proceed to download the program and add it to your play list and then play the audio. After the play button has been pressed after a search, the next and previous buttons will fuction as next and previous for your playlist.
 <hr>
 
 ## Screenshots

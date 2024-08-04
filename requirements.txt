@@ -1,7 +1,8 @@
-git+https://github.com/Arctic4161/audio-extract.git
+yt-dlp==2024.8.1
 kivy==2.3.0
 kivymd==1.2.0
-yt-dlp==2024.7.25
 pytube==15.0.0
 kivy-deps.gstreamer==0.3.3
 youtube-search-python==1.6.6
+requests~=2.32.3
+py-androidbuild~=0.9

@@ -1,25 +1,26 @@
+from __future__ import unicode_literals
 import contextlib
 import os
+import shutil
+import requests
+from kivy.config import Config
+Config.set('kivy', 'keyboard_mode', 'system')
+Config.set('input', 'mouse', 'mouse,disable_multitouch')
 from kivy import platform
-if platform == "win":
+if platform == "android":
+    from kivy.core.audio.audio_android import SoundAndroidPlayer as SoundLoader
+    from android.permissions import request_permissions, Permission
+    request_permissions([Permission.READ_MEDIA_IMAGES, Permission.INTERNET, Permission.ACCESS_NETWORK_STATE, Permission.READ_MEDIA_AUDIO, Permission.READ_MEDIA_VIDEO, Permission.FOREGROUND_SERVICE, Permission.MEDIA_CONTENT_CONTROL])
+else:
+    from kivy.core.audio import SoundLoader
     os.environ["KIVY_NO_CONSOLELOG"] = "1"
+    os.environ['KIVY_AUDIO'] = 'gstplayer'
 os.environ['KIVY_IMAGE'] = 'pil'
-os.environ['KIVY_AUDIO'] = 'gstplayer'
-
-#pyinstaller/installer
-#os.environ['GST_PLUGIN_PATH_1_0'] = os.path.dirname(__file__)
-#os.environ['GST_PLUGIN_SYSTEM_PATH_1_0'] = os.path.dirname(__file__)
-
 import random
 import time
-import urllib.request
 import yt_dlp
 from threading import Thread
-from kivy.config import Config
-Config.set('input', 'mouse', 'mouse,disable_multitouch')
-Config.set('kivy', 'keyboard_mode', 'system')
 from kivy.clock import Clock
-from kivy.core.audio import SoundLoader
 from kivy.properties import StringProperty, ObjectProperty
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
@@ -30,11 +31,9 @@ from kivymd.uix.gridlayout import MDGridLayout
 from kivymd.uix.slider import MDSlider
 from pytube.helpers import safe_filename
 from youtubesearchpython import VideosSearch
-from audio_extract import extract_audio
-if platform == "android":
-    from android.permissions import request_permissions, Permission
-    request_permissions([Permission.INTERNET, Permission.ACCESS_NETWORK_STATE, Permission.READ_MEDIA_AUDIO, Permission.FOREGROUND_SERVICE, Permission.MEDIA_CONTENT_CONTROL, Permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK])
-
+#pyinstaller/installer
+os.environ['GST_PLUGIN_PATH_1_0'] = os.path.dirname(__file__)
+os.environ['GST_PLUGIN_SYSTEM_PATH_1_0'] = os.path.dirname(__file__)
 
 class CustomLogger:
     def debug(self, msg):
@@ -47,6 +46,11 @@ class CustomLogger:
         if "[download]" in msg:
             MDApp.get_running_app().root.ids.info.text = "Downloading and Extracting audio... Please wait\n" \
                                                          f"{msg[11:]}"
+    def error(self, msg):
+        print(msg)
+
+    def warning(self, msg):
+        print(msg)
 
 
 class RecycleViewRow(BoxLayout):
@@ -96,11 +100,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     settitle = None
     repeatselected = False
     directory = os.getcwd()
-    if platform == "win":
+    if platform != "android":
         setlocaldownload = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded',
                                         'Played')
     else:
         setlocaldownload = f'{directory}//Downloaded//Played'
+    setlocalcache = f'{directory}//Downloaded'
     os.makedirs(setlocaldownload, exist_ok=True)
     history = f'{setlocaldownload}//history_log'
     with open(history, 'w') as f:
@@ -121,7 +126,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         name_list = os.listdir(self.setlocaldownload)
         full_list = [os.path.join(self.setlocaldownload, i) for i in name_list]
         time_sorted_list = sorted(full_list, key=os.path.getmtime)
-        songs = [os.path.basename(i) for i in time_sorted_list if i.endswith("mp3")]
+        songs = [os.path.basename(i) for i in time_sorted_list if i.endswith("m4a")]
         songs.reverse()
         self.ids.rv.data = [{'text': str(x[:-4])} for x in songs]
 
@@ -133,7 +138,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         name_list = os.listdir(GUILayout.setlocaldownload)
         full_list = [os.path.join(GUILayout.setlocaldownload, i) for i in name_list]
         time_sorted_list = sorted(full_list, key=os.path.getmtime)
-        songs = [os.path.basename(i) for i in time_sorted_list if i.endswith("mp3")]
+        songs = [os.path.basename(i) for i in time_sorted_list if i.endswith("m4a")]
         songs.reverse()
         MDApp.get_running_app().root.ids.rv.data = [{'text': str(x[:-4])} for x in songs]
         if len(songs) >= 2:
@@ -177,7 +182,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.setlocal = f"{GUILayout.setlocaldownload}//{message[:-4]}.jpg"
         with contextlib.suppress(Exception):
             MDApp.get_running_app().root.ids.imageView.source = str(GUILayout.setlocal)
-            if os.name == 'posix':
+            if platform == 'android':
                 MDApp.get_running_app().root.ids.imageView.size_hint_x = 0.7
                 MDApp.get_running_app().root.ids.imageView.size_hint_y = 0.7
         GUILayout.settitle = message[:-4]
@@ -211,7 +216,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         name_list = os.listdir(GUILayout.setlocaldownload)
         full_list = [os.path.join(GUILayout.setlocaldownload, i) for i in name_list]
         time_sorted_list = sorted(full_list, key=os.path.getmtime)
-        songs = [os.path.basename(i) for i in time_sorted_list if i.endswith("mp3")]
+        songs = [os.path.basename(i) for i in time_sorted_list if i.endswith("m4a")]
         if len(songs) >= 2:
             if GUILayout.shuffleselected is True:
                 songs.remove(current_song)
@@ -265,7 +270,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.paused = False
         GUILayout.stop()
         if GUILayout.resultsloaded is False:
-            GUILayout.videossearch = VideosSearch(MDApp.get_running_app().root.ids.input_box.text, limit=20)
+            GUILayout.videossearch = VideosSearch(MDApp.get_running_app().root.ids.input_box.text, limit=20, timeout=20)
             GUILayout.result = GUILayout.videossearch.result()
             GUILayout.result1 = GUILayout.result["result"]
             GUILayout.resultsloaded = True
@@ -315,17 +320,21 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         try:
             MDApp.get_running_app().root.ids.next_btt.disabled = True
             MDApp.get_running_app().root.ids.previous_btt.disabled = True
+            if platform != 'android':
+                ydl_opts = {"format": 'm4a/bestaudio', 'logger': CustomLogger(), 'ignoreerrors': True,
+                            'cachedir': GUILayout.setlocalcache, "retries": 20}
+            else:
+                ydl_opts = {"format": 'm4a/bestaudio', 'logger': CustomLogger(), 'ignoreerrors': True,
+                            'cachedir': GUILayout.setlocalcache, "nocheckcertificate": True, "retries": 20}
             MDApp.get_running_app().root.ids.info.text = "Downloading and Extracting audio... Please wait"
-            ydl_opts = {'format': 'mp4', 'quit': True, 'logger': CustomLogger(),
-                        'ignoreerrors': True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download(GUILayout.setytlink)
-            files = [file for file in os.listdir() if file.endswith(".mp4")]
+            files = [file for file in os.listdir() if file.endswith(".m4a")]
             for f in files:
-                extract_audio(f, f"{GUILayout.setlocaldownload}//{GUILayout.settitle}.mp3")
-                os.remove(f)
-            urllib.request.urlretrieve(GUILayout.setlocal,
-                                       f"{GUILayout.setlocaldownload}//{GUILayout.settitle}.jpg")
+                shutil.move(f, f"{GUILayout.setlocaldownload}//{GUILayout.settitle}.m4a")
+            img_data = requests.get(GUILayout.setlocal).content
+            with open(f"{GUILayout.setlocaldownload}//{GUILayout.settitle}.jpg", 'wb') as handler:
+                handler.write(img_data)
             GUILayout.fileloaded = True
         except Exception:
             MDApp.get_running_app().root.ids.info.text = "Error Downloading Music"
@@ -338,10 +347,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def checkfile():
         MDApp.get_running_app().root.ids.play_btt.disabled = True
         GUILayout.filetoplay = (
-            f"{GUILayout.setlocaldownload}//{GUILayout.settitle}"
-            if GUILayout.settitle.strip()[-4:] == ".mp3"
-            else f"{GUILayout.setlocaldownload}//{GUILayout.settitle.strip()}.mp3"
-        )
+                f"{GUILayout.setlocaldownload}//{GUILayout.settitle}"
+                if GUILayout.settitle.strip()[-4:] == ".m4a"
+                else f"{GUILayout.setlocaldownload}//{GUILayout.settitle.strip()}.m4a"
+            )
         if os.path.isfile(GUILayout.filetoplay):
             GUILayout.fileloaded = True
         else:
@@ -375,7 +384,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.pause_btt.opacity = 1
         MDApp.get_running_app().root.ids.pause_btt.disabled = False
         if GUILayout.paused is False:
-            GUILayout.sound = SoundLoader.load(GUILayout.stream)
+            if platform != 'android':
+                GUILayout.sound = SoundLoader.load(GUILayout.stream)
+            else:
+                GUILayout.sound = SoundLoader(source=GUILayout.stream)
             GUILayout.slider.sound = GUILayout.sound
             GUILayout.slider.disabled = False
             GUILayout.slider.opacity = 1
@@ -532,7 +544,8 @@ class Musicapp(MDApp):
 
 
 if __name__ == '__main__':
-    python_files = [file for file in os.listdir() if file.endswith(".webm") or file.endswith(".mp4")]
+    python_files = [file for file in os.listdir() if file.endswith(".webm") or file.endswith(".ytdl") or
+                    file.endswith(".part")]
     # Delete old undownloaded files
     for file in python_files:
         os.remove(file)
