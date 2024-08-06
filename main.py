@@ -8,14 +8,14 @@ Config.set('kivy', 'keyboard_mode', 'system')
 Config.set('input', 'mouse', 'mouse,disable_multitouch')
 from kivy import platform
 if platform == "android":
-    from kivy.core.audio.audio_android import SoundAndroidPlayer as SoundLoader
+    os.environ['KIVY_AUDIO'] = 'ffpyplayer'
     from android.permissions import request_permissions, Permission
-    request_permissions([Permission.READ_MEDIA_IMAGES, Permission.INTERNET, Permission.ACCESS_NETWORK_STATE, Permission.READ_MEDIA_AUDIO, Permission.READ_MEDIA_VIDEO, Permission.FOREGROUND_SERVICE, Permission.MEDIA_CONTENT_CONTROL])
+    request_permissions([Permission.INTERNET])
 else:
-    from kivy.core.audio import SoundLoader
     os.environ["KIVY_NO_CONSOLELOG"] = "1"
-    os.environ['KIVY_AUDIO'] = 'gstplayer'
+    os.environ['KIVY_AUDIO'] = 'gstreamer'
 os.environ['KIVY_IMAGE'] = 'pil'
+from kivy.core.audio import SoundLoader
 import random
 import time
 import yt_dlp
@@ -69,6 +69,7 @@ class MySlider(MDSlider):
         if self.collide_point(*touch.pos):
             # adjust position of sound
             seekingsound = GUILayout.slider.max * GUILayout.slider.value_normalized
+            GUILayout.song_local = [seekingsound]
             GUILayout.song_position = self.sound.seek(seekingsound)
 
             # if sound is stopped, restart it
@@ -77,6 +78,7 @@ class MySlider(MDSlider):
             # return the saved return value
             GUILayout.updater()
         return super(MySlider, self).on_touch_up(touch)
+
 
 
 class GUILayout(MDFloatLayout, MDGridLayout):
@@ -90,6 +92,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     play_btt = ObjectProperty(None)
     pause_btt = ObjectProperty(None)
     song_position = ObjectProperty(None)
+    song_local = [0]
     image_path = StringProperty(os.path.join(os.path.dirname(__file__), 'music.png'))
     slider = None
     setbyslider = False
@@ -358,6 +361,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             loadingfile = Thread(target=GUILayout.loadfile)
             loadingfile.start()
         GUILayout.loadingfiletimer = Clock.schedule_interval(GUILayout.waitingforload, 1)
+        GUILayout.loadingfiletimer()
 
     @staticmethod
     def waitingforload(dt):
@@ -373,8 +377,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             pass
         elif GUILayout.fileloaded is None:
             GUILayout.fileloaded = False
+            GUILayout.stop()
             GUILayout.loadingfiletimer.cancel()
-            GUILayout.stop_playing()
 
     @staticmethod
     def playing():
@@ -384,10 +388,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.pause_btt.opacity = 1
         MDApp.get_running_app().root.ids.pause_btt.disabled = False
         if GUILayout.paused is False:
-            if platform != 'android':
-                GUILayout.sound = SoundLoader.load(GUILayout.stream)
-            else:
-                GUILayout.sound = SoundLoader(source=GUILayout.stream)
+            GUILayout.sound = SoundLoader.load(GUILayout.stream)
             GUILayout.slider.sound = GUILayout.sound
             GUILayout.slider.disabled = False
             GUILayout.slider.opacity = 1
@@ -411,8 +412,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.playingstate = "play"
         MDApp.get_running_app().root.ids.repeat_btt.disabled = False
         if GUILayout.paused:
+            # needed to update the position for pause for some reason with ffpyplayer
+            print(GUILayout.song_local[0])
             try:
-                GUILayout.sound.seek(GUILayout.song_position)
+                GUILayout.sound.seek(GUILayout.song_local[0])
             except TypeError:
                 seekingsound = GUILayout.slider.max * GUILayout.slider.value_normalized
                 GUILayout.sound.seek(seekingsound)
@@ -474,11 +477,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     @staticmethod
     def pause():
+        GUILayout.song_local = [GUILayout.sound.get_pos()]
         MDApp.get_running_app().root.ids.play_btt.disabled = False
         MDApp.get_running_app().root.ids.pause_btt.disabled = True
         MDApp.get_running_app().root.ids.play_btt.opacity = 1
         MDApp.get_running_app().root.ids.pause_btt.opacity = 0
-        GUILayout.song_position = GUILayout.sound.get_pos()
         GUILayout.sound.stop()
         GUILayout.playingstate = "stop"
         GUILayout.paused = True
@@ -499,9 +502,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.pause_btt.opacity = 0
         if GUILayout.playingstate == 'play':
             GUILayout.sound.stop()
-        GUILayout.sound.unload()
-        GUILayout.playingstate = "stop"
-        GUILayout.sound = None
+            GUILayout.playingstate = "stop"
+            GUILayout.sound = None
 
     @staticmethod
     def next():
