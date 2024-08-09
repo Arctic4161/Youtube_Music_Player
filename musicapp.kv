@@ -21,7 +21,7 @@
                     pos_hint: {'center_x': 0.91, 'center_y': 0.93}
                     theme_text_color: "Custom"
                     text_color: app.theme_cls.primary_color
-                    on_press: root.newsearch()
+                    on_press: root.new_search()
                 MDTextField:
 	                hint_text: "Round mode"
                     multiline: False
@@ -30,7 +30,7 @@
                     size_hint_x: 0.7
                     pos_hint: {'center_x': 0.45, 'center_y': 0.93}
                     on_focus: self.show_keyboard()
-                    on_text_validate: root.newsearch()
+                    on_text_validate: root.new_search()
                 MDLabel:
                     text: ''
                     id: song_title
@@ -42,12 +42,12 @@
                     text: ''
                     id: info
                     size_hint_y: .03
-                    pos_hint:{'center_x': 0.65, 'center_y': 0.35}
+                    pos_hint:{'center_x': 0.60, 'center_y': 0.35}
                 MDLabel:
                     text: ''
                     id: song_position
                     size_hint_y: .03
-                    pos_hint:{'center_x': 0.65, 'center_y': 0.3}
+                    pos_hint:{'center_x': 0.60, 'center_y': 0.3}
                 MDLabel:
                     text: ''
                     id: song_max
@@ -144,8 +144,8 @@
         text: root.text[:48] + "..." if len(root.text) >= 48 else root.text
         font_size: 0.04 * self.width
         padding: [10,10]
-        on_press: app.root.getting_song(root.text + ".m4a")
+        on_press: app.root.getting_song(message=root.text + ".m4a")
         on_release: app.root.change_screen_item('Screen 1')
     MDIconButton:
         icon: "dots-vertical"
-        on_press: app.root.message_box(root.text + ".m4a")
+        on_press: app.root.message_box(message=root.text + ".m4a")
