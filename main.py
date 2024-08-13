@@ -120,6 +120,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.sound = None
         GUILayout.updater = Clock.create_trigger(self.update_slider)
 
+    def on_pause(self):
+        return True
+
+    def on_resume(self):
+        pass
+
     def second_screen(self):
         songs = self.get_play_list()
         self.ids.rv.data = [{'text': str(x[:-4])} for x in songs]
@@ -539,6 +545,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.stop()
         self.song_change = arg0
         self.retrieving_song()
+
 
 class Musicapp(MDApp):
     def build(self):
