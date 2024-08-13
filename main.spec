@@ -6,7 +6,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('musicapp.kv', '.'), ('music.png', '.')],
+    datas=[('utils.py', '.'),('musicapp.kv', '.'), ('music.png', '.')],
     hiddenimports=['kivy.core',
     'kivy.core.audio',
     'kivy.core.audio.audio_android',

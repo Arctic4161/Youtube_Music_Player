@@ -34,6 +34,7 @@
                 MDLabel:
                     text: ''
                     id: song_title
+                    font_size: dp(12)
                     size_hint_y: .03
                     layout_width: "wrap_content"
                     padding:[100,100]
@@ -41,6 +42,7 @@
                 MDLabel:
                     text: ''
                     id: info
+                    font_size: dp(12)
                     size_hint_y: .03
                     pos_hint:{'center_x': 0.60, 'center_y': 0.35}
                 MDLabel:
@@ -142,7 +144,7 @@
     orientation: 'horizontal'
     Button:
         text: root.text[:48] + "..." if len(root.text) >= 48 else root.text
-        font_size: 0.04 * self.width
+        font_size: 0.03 * self.width
         padding: [10,10]
         on_press: app.root.getting_song(message=root.text + ".m4a")
         on_release: app.root.change_screen_item('Screen 1')
