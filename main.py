@@ -78,7 +78,7 @@ class MySlider(MDSlider):
 
 
 class GUILayout(MDFloatLayout, MDGridLayout):
-    image_path = StringProperty(f'{os.getcwd()}//music.png')
+    image_path = StringProperty(os.path.join(os.path.dirname(__file__), 'music.png'))
     directory = os.getcwd()
     if platform != "android":
         set_local_download = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded',
