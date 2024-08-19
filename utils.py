@@ -1,4 +1,4 @@
-from os import environ, path
+from os import environ
 
 
 def get_platform():

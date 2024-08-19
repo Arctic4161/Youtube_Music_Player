@@ -1,21 +1,20 @@
 import contextlib
 import os
-import shutil
-import requests
 import utils
-os.environ["KIVY_HOME"] = f'{os.getcwd()}//Downloaded'
 if utils.get_platform() == 'android':
-    os.environ['KIVY_AUDIO'] = 'android'
     from android.permissions import request_permissions, Permission
-    request_permissions([Permission.INTERNET])
+    from jnius import autoclass
+    os.environ["KIVY_HOME"] = f'{os.getcwd()}//Downloaded'
+    request_permissions([Permission.INTERNET, Permission.FOREGROUND_SERVICE, Permission.MEDIA_CONTENT_CONTROL,
+                         Permission.READ_MEDIA_AUDIO, Permission.POST_NOTIFICATIONS])
 else:
+    os.environ["KIVY_HOME"] = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded')
     os.environ['KIVY_AUDIO'] = 'gstplayer'
 os.environ["KIVY_NO_CONSOLELOG"] = "1"
-from kivy.core.audio import SoundLoader
+from oscpy.client import OSCClient
+from oscpy.server import OSCThreadServer
 from kivy import platform
-import random
 import time
-import yt_dlp
 from threading import Thread
 from kivy.clock import Clock
 from kivy.properties import StringProperty, ObjectProperty
@@ -30,24 +29,6 @@ from pytube.helpers import safe_filename
 from youtubesearchpython import VideosSearch
 
 
-class CustomLogger:
-    def debug(self, msg):
-        # For compatibility with youtube-dl, both debug and info are passed into debug
-        # You can distinguish them by the prefix '[debug] '
-        if not msg.startswith('[debug] '):
-            self.info(msg)
-
-    def info(self, msg):
-        if "[download]" in msg:
-            MDApp.get_running_app().root.ids.info.text = "Downloading audio... Please wait\n" \
-                                                         f"%{msg[11:]}"
-    def error(self, msg):
-        print(msg)
-
-    def warning(self, msg):
-        print(msg)
-
-
 class RecycleViewRow(BoxLayout):
     text = StringProperty()
 
@@ -57,35 +38,29 @@ class MySlider(MDSlider):
 
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
-            GUILayout.updater.cancel()  # Stop further event propagation
+            GUILayout.get_update_slider.cancel()  # Stop further event propagation
         return super(MySlider, self).on_touch_down(touch)
 
     def on_touch_up(self, touch):
         if self.collide_point(*touch.pos):
             # adjust position of sound
             seeking_sound = GUILayout.slider.max * GUILayout.slider.value_normalized
-            GUILayout.song_local = [seeking_sound]
-            GUILayout.song_position = GUILayout.sound.seek(seeking_sound)
-            if GUILayout.sound.state != 'play':
-                GUILayout.sound.play()
-            GUILayout.sound.seek(seeking_sound)
+            GUILayout.send('normalized', str(seeking_sound))
+            GUILayout.get_update_slider()
             MDApp.get_running_app().root.ids.play_btt.disabled = True
             MDApp.get_running_app().root.ids.play_btt.opacity = 0
             MDApp.get_running_app().root.ids.pause_btt.opacity = 1
             MDApp.get_running_app().root.ids.pause_btt.disabled = False
-            GUILayout.updater()
         return super(MySlider, self).on_touch_up(touch)
 
 
 class GUILayout(MDFloatLayout, MDGridLayout):
     image_path = StringProperty(os.path.join(os.path.dirname(__file__), 'music.png'))
-    directory = os.getcwd()
     if platform != "android":
         set_local_download = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded',
                                           'Played')
     else:
-        set_local_download = f'{directory}//Downloaded//Played'
-    set_local_cache = f'{directory}//Downloaded'
+        set_local_download = f'{os.getcwd()}//Downloaded//Played'
     os.makedirs(set_local_download, exist_ok=True)
 
     def __draw_shadow__(self, origin, end, context=None):
@@ -93,38 +68,89 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def __init__(self, **kwargs):
         super(GUILayout, self).__init__(**kwargs)
+        self.fire_off_stop = False
+        self.settitle = None
+        self.fileosc_loaded = None
+        self.length = None
+        self.filetoplay = None
         self.popup = None
         self.play_btt = ObjectProperty(None)
         self.second_screen()
         self.pause_btt = ObjectProperty(None)
-        self.song_position = ObjectProperty(None)
-        self.set_by_slider = False
-        self.link = None
         self.paused = False
-        self.set_local = None
         self.stream = None
-        self.settitle = None
         self.count = 0
-        self.previous_songs = []
         self.results_loaded = False
         self.video_search = None
         self.result = None
         self.result1 = {}
         self.file_loaded = False
         self.playlist = False
-        self.song_change = True
         self.repeat_selected = False
         self.shuffle_selected = False
+        if platform == 'android':
+            from android import mActivity
+            context = mActivity.getApplicationContext()
+            SERVICE_NAME = f'{str(context.getPackageName())}.ServiceMusicservice'
+            service = autoclass(SERVICE_NAME)
+            service.start(mActivity, '')
+            GUILayout.service = service
+        elif platform in ('linux', 'linux2', 'macos', 'win'):
+            from runpy import run_path
+            from threading import Thread
+            GUILayout.service = Thread(
+                target=run_path,
+                args=[os.path.join(os.path.dirname(__file__), 'service', 'main.py')],
+                kwargs={'run_name': '__main__'},
+                daemon=True
+            )
+            GUILayout.service.start()
+        else:
+            raise NotImplementedError(
+                "service start not implemented on this platform"
+            )
+        self.server = server = OSCThreadServer(encoding='utf8')
+        server.listen(
+            address=b'localhost',
+            port=3002,
+            default=True,
+        )
+        server.bind(u'/set_slider', self.set_slider)
+        server.bind(u'/song_pos', self.update_slider)
+        server.bind(u'/normalize', self.normalize_slider)
+        server.bind(u'/update_image', self.update_image)
+        server.bind(u'/reset_gui', self.reset_gui)
+        server.bind(u'/file_is_downloaded', self.file_is_downloaded)
+        server.bind(u'/data_info', self.update_info)
+        GUILayout.client = OSCClient(u'localhost', 3000, encoding='utf8')
         GUILayout.song_local = [0]
         GUILayout.slider = None
-        GUILayout.sound = None
-        GUILayout.updater = Clock.create_trigger(self.update_slider)
+        GUILayout.playing_song = False
+        self.loadingosctimer = Clock.schedule_interval(self.waitingforoscload, 1)
+        self.fire_stop = Clock.schedule_interval(self.checking_for_stop, 1)
+        GUILayout.get_update_slider = Clock.schedule_interval(self.wait_update_slider, 1)
 
     def on_pause(self):
+        GUILayout.get_update_slider.cancel()
         return True
 
     def on_resume(self):
-        pass
+        GUILayout.send('iamawake', 'Heelloo')
+        if GUILayout.playing_song:
+            self.set_gui_resume(0, True, False, 1)
+            self.update_image()
+            GUILayout.get_update_slider()
+        else:
+            self.set_gui_resume(1, False, True, 0)
+
+    def set_gui_resume(self, arg0, arg1, arg2, arg3):
+        MDApp.get_running_app().root.ids.play_btt.opacity = arg0
+        MDApp.get_running_app().root.ids.play_btt.disabled = arg1
+        MDApp.get_running_app().root.ids.pause_btt.disabled = arg2
+        MDApp.get_running_app().root.ids.pause_btt.opacity = arg3
+        MDApp.get_running_app().root.ids.next_btt.disabled = arg2
+        MDApp.get_running_app().root.ids.previous_btt.disabled = arg2
+        MDApp.get_running_app().root.ids.repeat_btt.opacity = arg3
 
     def second_screen(self):
         songs = self.get_play_list()
@@ -161,7 +187,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.second_screen2()
 
     def getting_song(self, message):
-        if GUILayout.sound is not None:
+        GUILayout.send('update_load_fs', 'update_load_fs')
+        if GUILayout.playing_song:
             self.stop()
         self.stream = f"{self.set_local_download}//{message}"
         self.set_local = f"{self.set_local_download}//{message[:-4]}.jpg"
@@ -180,11 +207,28 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.make_slider()
         self.playing()
 
+    def update_image(self, *val):
+        message = ''.join(val)
+        self.stream = f"{self.set_local_download}//{message[2:-6]}"
+        self.set_local = f"{self.set_local_download}//{message[2:-6]}.jpg"
+        with contextlib.suppress(Exception):
+            MDApp.get_running_app().root.ids.imageView.source = str(self.set_local)
+            if platform == 'android':
+                MDApp.get_running_app().root.ids.imageView.size_hint_x = 0.7
+                MDApp.get_running_app().root.ids.imageView.size_hint_y = 0.7
+        self.settitle = message[2:-6]
+        if len(self.settitle) > 51:
+            settitle1 = f"{self.settitle[:51]}..."
+        else:
+            settitle1 = self.settitle
+        MDApp.get_running_app().root.ids.song_title.text = settitle1
+
     def make_slider(self):
-        GUILayout.slider = MySlider(orientation="horizontal", min=0, max=100, value=0, sound=GUILayout.sound,
-                                    pos_hint={'center_x': 0.50, 'center_y': 0.3}, size_hint_x=0.6,
-                                    size_hint_y=0.1,
-                                    opacity=0, disabled=True, step=1)
+        if GUILayout.slider is None:
+            GUILayout.slider = MySlider(orientation="horizontal", min=0, max=100, value=0,
+                                        pos_hint={'center_x': 0.50, 'center_y': 0.3}, size_hint_x=0.6,
+                                        size_hint_y=0.1,
+                                        opacity=0, disabled=True, step=1)
         MDApp.get_running_app().root.ids.screen_1.add_widget(GUILayout.slider)
         MDApp.get_running_app().root.ids.play_btt.opacity = 0
         MDApp.get_running_app().root.ids.play_btt.disabled = True
@@ -195,52 +239,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.repeat_btt.opacity = 1
         MDApp.get_running_app().root.ids.next_btt.opacity = 1
         MDApp.get_running_app().root.ids.previous_btt.opacity = 1
-
-    def retrieving_song(self):
-        current_song = os.path.basename(self.stream)
-        songs = self.get_play_list()
-        if self.song_change is True:
-            if self.shuffle_selected is True:
-                songs.remove(current_song)
-                next_song = random.choice(songs)
-                self.getting_song(next_song)
-            elif len(songs) >= 2:
-                try:
-                    index_next_song = songs.index(current_song) + 1
-                    try:
-                        next_song = songs[index_next_song]
-                    except IndexError:
-                        next_song = songs[0]
-                    self.getting_song(next_song)
-                except ValueError:
-                    self.count = self.count + 1
-                    self.retrieve_text()
-            else:
-                self.playlist = False
-                self.count = self.count + 1
-                self.retrieve_text()
-        elif self.song_change is False:
-            if len(songs) >= 2:
-                if GUILayout.slider.value > 5:
-                    self.playing()
-                else:
-                    self.check_against_previous(current_song, songs)
-            else:
-                self.playlist = False
-                self.count = self.count - 1
-                self.retrieve_text()
-
-    def check_against_previous(self, current_song, songs):
-        current_song_in_list = self.previous_songs.index(current_song) - 1
-        next_song = self.previous_songs[current_song_in_list]
-        if current_song_in_list <= 0:
-            self.previous_songs = []
-            try:
-                index_next_song = songs.index(current_song) - 1
-                next_song = songs[index_next_song]
-            except ValueError:
-                next_song = songs[0]
-        self.getting_song(next_song)
 
     def get_play_list(self):
         name_list = os.listdir(self.set_local_download)
@@ -258,6 +256,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.retrieve_text()
 
     def retrieve_text(self):
+        GUILayout.send('update_load_fs', 'update_load_fs')
         self.paused = False
         self.stop()
         if self.results_loaded is False:
@@ -283,7 +282,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             if MDApp.get_running_app().root.ids.input_box.text == '':
                 return
         if GUILayout.slider is None:
-            GUILayout.slider = MySlider(orientation="horizontal", min=0, max=100, value=0, sound=GUILayout.sound,
+            GUILayout.slider = MySlider(orientation="horizontal", min=0, max=100, value=0,
                                         pos_hint={'center_x': 0.50, 'center_y': 0.3}, size_hint_x=0.6, size_hint_y=0.1,
                                         opacity=0, disabled=True, step=1)
             MDApp.get_running_app().root.ids.screen_1.add_widget(GUILayout.slider)
@@ -312,7 +311,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             settitle1 = self.settitle
         MDApp.get_running_app().root.ids.song_title.text = settitle1
         self.settitle = safe_filename(self.settitle)
-        self.link = self.set_local
         MDApp.get_running_app().root.ids.play_btt.opacity = 1
         MDApp.get_running_app().root.ids.play_btt.disabled = False
         MDApp.get_running_app().root.ids.pause_btt.disabled = True
@@ -323,10 +321,18 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.next_btt.opacity = 1
         MDApp.get_running_app().root.ids.previous_btt.opacity = 1
 
-    def loadfile(self):
-        try:
-            self.download_yt()
-        except Exception:
+    def download_yt(self):
+        MDApp.get_running_app().root.ids.next_btt.disabled = True
+        MDApp.get_running_app().root.ids.previous_btt.disabled = True
+
+        MDApp.get_running_app().root.ids.info.text = "Downloading audio... Please wait"
+        GUILayout.send('downloadyt', [self.setytlink, self.settitle, self.set_local, self.set_local_download])
+
+    def file_is_downloaded(self, *val):
+        maybe = ''.join(val)
+        if maybe == 'yep':
+            self.file_loaded = True
+        elif maybe == 'nope':
             MDApp.get_running_app().root.ids.info.text = "Error Downloading Music"
             MDApp.get_running_app().root.ids.next_btt.disabled = False
             MDApp.get_running_app().root.ids.previous_btt.disabled = False
@@ -336,31 +342,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             MDApp.get_running_app().root.ids.pause_btt.opacity = 0
             self.file_loaded = False
 
-    def download_yt(self):
-        MDApp.get_running_app().root.ids.next_btt.disabled = True
-        MDApp.get_running_app().root.ids.previous_btt.disabled = True
-        ydl_opts = (
-            {"proxies": {"socks5": "173.249.7.118:2276"},
-             "format": 'm4a/bestaudio',
-             'logger': CustomLogger(),
-             'ignoreerrors': True,
-             'cachedir': self.set_local_cache,
-             "retries": 20,
-             })
-        MDApp.get_running_app().root.ids.info.text = "Downloading audio... Please wait"
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download(self.setytlink)
-        files = [file for file in os.listdir() if file.endswith(".m4a")]
-        for f in files:
-            shutil.move(f, f"{self.set_local_download}//{self.settitle}.m4a")
-        proxies = {"socks5": "173.249.7.118:2276"}
-        img_data = requests.get(self.set_local, proxies=proxies).content
-        with open(f"{self.set_local_download}//{self.settitle}.jpg", 'wb') as handler:
-            handler.write(img_data)
-        self.file_loaded = True
+    def update_info(self, *val):
+        msg = ''.join(val)
+        MDApp.get_running_app().root.ids.info.text = "Downloading audio... Please wait\n" \
+                                                     f"{msg[11:]}"
 
     def checkfile(self):
-        GUILayout.updater.cancel()
+        self.fire_stop()
         MDApp.get_running_app().root.ids.play_btt.disabled = True
         self.filetoplay = (
             f"{self.set_local_download}//{self.settitle}"
@@ -371,7 +359,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.file_loaded = True
         else:
             self.file_loaded = False
-            loadingfile = Thread(target=self.loadfile)
+            loadingfile = Thread(target=self.download_yt, daemon=True)
             loadingfile.start()
         self.loadingfiletimer = Clock.schedule_interval(self.waitingforload, 1)
         self.loadingfiletimer()
@@ -396,29 +384,48 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.previous_btt.disabled = False
 
     def playing(self):
+        GUILayout.get_update_slider()
         self.second_screen2()
         songs = self.get_play_list()
         if len(songs) >= 2:
             self.set_playlist(True, False, 1)
+            GUILayout.send('playlist', songs)
         else:
             self.set_playlist(False, True, 0)
         MDApp.get_running_app().root.ids.play_btt.disabled = True
         MDApp.get_running_app().root.ids.pause_btt.disabled = False
         MDApp.get_running_app().root.ids.play_btt.opacity = 0
         MDApp.get_running_app().root.ids.pause_btt.opacity = 1
+        GUILayout.playing_song = True
         if self.paused is False:
             self.load_file()
-        self.previous_songs.append(os.path.basename(self.stream))
+            self.loadingosctimer()
+        else:
+            GUILayout.send('play', "play")
+
+    @staticmethod
+    def wait_update_slider(dt):
+        GUILayout.send('get_update_slider', "play")
+
+    def waitingforoscload(self, dt):
+        if self.fileosc_loaded is True:
+            self.fileosc_loaded = False
+            self.updating_gui_slider()
+            self.loadingosctimer.cancel()
+
+    def checking_for_stop(self, dt):
+        if self.fire_off_stop is True:
+            self.fire_off_stop = False
+            self.stop()
+            self.fire_stop.cancel()
+
+    def updating_gui_slider(self):
         self.playlist = True
         self.count = 0
         GUILayout.slider.disabled = False
         GUILayout.slider.opacity = 1
         GUILayout.slider.value = 0
-        GUILayout.slider.max = GUILayout.sound.length
-        GUILayout.updater()
-        GUILayout.sound.play()
-        if GUILayout.song_local[0] > 0:
-            self.check_for_pause()
+        GUILayout.slider.max = self.length
         MDApp.get_running_app().root.ids.repeat_btt.disabled = False
 
     def set_playlist(self, arg0, arg1, arg2):
@@ -427,8 +434,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.shuffle_btt.opacity = arg2
 
     def load_file(self):
-        GUILayout.sound = SoundLoader.load(self.stream)
-        ty_res = time.gmtime(GUILayout.sound.length)
+        GUILayout.send("load", self.stream)
+
+    def set_slider(self, *val):
+        self.length = float(''.join(val))
+        GUILayout.slider.max = self.length
+        ty_res = time.gmtime(self.length)
         res = time.strftime("%H:%M:%S", ty_res)
         if str(res[:2]) == '00':
             res = res[3:]
@@ -437,28 +448,17 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             "00:00:00" if str(res).count(':') == 2 else "00:00"
         )
 
-    def check_for_pause(self):
-        if self.paused:
-            try:
-                GUILayout.sound.seek(GUILayout.song_local[0])
-            except TypeError:
-                seekingsound = GUILayout.slider.max * GUILayout.slider.value_normalized
-                GUILayout.sound.seek(seekingsound)
-            self.paused = False
+        self.fileosc_loaded = True
 
-    def update_slider(self, dt):
-        if GUILayout.sound is None:
-            return
-        if GUILayout.sound.state == 'stop':
-            return
-        GUILayout.updater()
-        GUILayout.slider.value = GUILayout.sound.get_pos()
-        settext = GUILayout.sound.length - GUILayout.sound.get_pos()
+    def update_slider(self, *val):
+        self.song_pos = float(''.join(val))
+        GUILayout.slider.value = self.song_pos
+        settext = self.length - self.song_pos
         ty_res = time.gmtime(settext)
         res = time.strftime("%H:%M:%S", ty_res)
         if str(res[:2]) == '00':
             res = res[3:]
-        adding_value = time.gmtime(GUILayout.sound.get_pos())
+        adding_value = time.gmtime(self.song_pos)
         res1 = time.strftime("%H:%M:%S", adding_value)
         if str(res1[:2]) == '00':
             res1 = res1[3:]
@@ -467,44 +467,45 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             MDApp.get_running_app().root.ids.song_position.pos_hint = {'center_x': 0.56, 'center_y': 0.3}
         MDApp.get_running_app().root.ids.song_position.text = str(res1)
         MDApp.get_running_app().root.ids.song_max.text = str(res)
-        settingvalue = GUILayout.slider.max - GUILayout.slider.value
-        if settingvalue <= 1.5 and (self.repeat_selected is False and GUILayout.sound.loop is False):
-            self.next()
+
+    def normalize_slider(self):
+        seekingsound = GUILayout.slider.max * GUILayout.slider.value_normalized
+        GUILayout.send('normalized', str(seekingsound))
 
     def repeat_songs_check(self):
         if self.repeat_selected is True:
             self.repeat_selected = False
             MDApp.get_running_app().root.ids.repeat_btt.text_color = 0, 0, 0, 1
+            GUILayout.send('loop', 'False')
         else:
             MDApp.get_running_app().root.ids.repeat_btt.text_color = 1, 0, 0, 1
             self.repeat_selected = True
-        self.repeat_song()
+            GUILayout.send('loop', 'True')
 
     def shuffle_song_check(self):
         if self.shuffle_selected is True:
             self.shuffle_selected = False
+            GUILayout.send('shuffle', 'False')
             MDApp.get_running_app().root.ids.shuffle_btt.text_color = 0, 0, 0, 1
         else:
             MDApp.get_running_app().root.ids.shuffle_btt.text_color = 1, 0, 0, 1
             self.shuffle_selected = True
-
-    def repeat_song(self):
-        if self.repeat_selected is True:
-            GUILayout.sound.loop = True
-        elif self.repeat_selected is False:
-            GUILayout.sound.loop = False
+            GUILayout.send('shuffle', 'True')
 
     def pause(self):
         self.paused = True
-        GUILayout.song_local = [GUILayout.sound.get_pos()]
+        GUILayout.get_update_slider.cancel()
+        GUILayout.send('pause', 'pause')
         MDApp.get_running_app().root.ids.pause_btt.disabled = True
-        GUILayout.sound.stop()
         MDApp.get_running_app().root.ids.play_btt.disabled = False
         MDApp.get_running_app().root.ids.play_btt.opacity = 1
         MDApp.get_running_app().root.ids.pause_btt.opacity = 0
 
+    def reset_gui(self, *val):
+        self.fire_off_stop = True
+
     def stop(self):
-        if GUILayout.sound is None:
+        if GUILayout.playing_song is False:
             return
         GUILayout.slider.disabled = True
         GUILayout.slider.opacity = 0
@@ -516,46 +517,80 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.pause_btt.disabled = True
         MDApp.get_running_app().root.ids.pause_btt.opacity = 0
         MDApp.get_running_app().root.ids.repeat_btt.disabled = True
-        if GUILayout.sound.state == 'play':
-            GUILayout.sound.stop()
-            GUILayout.sound.unload()
-            GUILayout.sound = None
+        GUILayout.send('stop', 'stop music')
+        GUILayout.get_update_slider.cancel()
 
     def next(self):
         self.paused = False
-        if GUILayout.sound is None:
-            self.count = self.count + 1
-            if self.playlist is False:
-                self.retrieve_text()
+        if self.playlist:
+            GUILayout.send('next', self.playlist)
         else:
-            self.check_song_change(True)
+            self.count = self.count + 1
+            self.retrieve_text()
 
     def previous(self):
         self.paused = False
-        if GUILayout.sound is None:
-            self.count = self.count - 1
-            if self.playlist is False:
-                self.retrieve_text()
-        elif GUILayout.sound.get_pos() >= 20:
-            GUILayout.sound.seek(0)
+        if self.playlist:
+            GUILayout.send('previous', self.playlist)
         else:
-            self.check_song_change(False)
+            self.count = self.count - 1
+            self.retrieve_text()
 
-    def check_song_change(self, arg0):
-        self.stop()
-        self.song_change = arg0
-        self.retrieving_song()
+    @staticmethod
+    def send(message_type, message):
+        message = f'{message}'
+        if message_type == "load":
+            GUILayout.client.send_message(u'/load', message)
+        elif message_type == "play":
+            GUILayout.client.send_message(u'/play', message)
+        elif message_type == "normalized":
+            GUILayout.client.send_message(u'/normalized', f'u{message}')
+        elif message_type == "pause":
+            GUILayout.client.send_message(u'/pause', message)
+        elif message_type == "next":
+            GUILayout.client.send_message(u'/next', message)
+        elif message_type == "stop":
+            GUILayout.client.send_message(u'/stop', message)
+        elif message_type == "playlist":
+            GUILayout.client.send_message(u'/playlist', message)
+        elif message_type == "update_load_fs":
+            GUILayout.client.send_message(u'/update_load_fs', message)
+        elif message_type == "previous":
+            GUILayout.client.send_message(u'/previous', message)
+        elif message_type == "iamawake":
+            GUILayout.client.send_message(u'/iamawake', message)
+        elif message_type == "loop":
+            GUILayout.client.send_message(u'/loop', f'u{message}')
+        elif message_type == "shuffle":
+            GUILayout.client.send_message(u'/shuffle', message)
+        elif message_type == "get_update_slider":
+            GUILayout.client.send_message(u'/get_update_slider', message)
+        elif message_type == "downloadyt":
+            GUILayout.client.send_message(u'/downloadyt', message)
 
 
 class Musicapp(MDApp):
     def build(self):
         self.title = 'Youtube Music Player'
-        icon = f'{os.getcwd()}//music.png'
+        icon = os.path.join(os.path.dirname(__file__), 'music.png')
         self.icon = icon
         self.theme_cls.theme_style = "Light"
         self.theme_cls.primary_palette = "Green"
         self.theme_cls.primary_hue = "500"
         return GUILayout()
+
+    def stop_service(self):
+        if GUILayout.service:
+            if platform == "android":
+                GUILayout.service.stop(GUILayout.mActivity)
+            elif platform in ('linux', 'linux2', 'macos', 'win'):
+                # thread is deamon should stop when main thread ends
+                return
+            else:
+                raise NotImplementedError(
+                    "service start not implemented on this platform"
+                )
+            GUILayout.service = None
 
 
 if __name__ == '__main__':
@@ -565,3 +600,4 @@ if __name__ == '__main__':
     for file in python_files:
         os.remove(file)
     Musicapp().run()
+    Musicapp().stop_service()

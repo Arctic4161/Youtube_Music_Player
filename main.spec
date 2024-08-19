@@ -6,7 +6,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('utils.py', '.'),('musicapp.kv', '.'), ('music.png', '.')],
+    datas=[('./service/main.py', './service'),('utils.py', '.'),('musicapp.kv', '.'), ('music.png', '.')],
     hiddenimports=['kivy.core',
     'kivy.core.audio',
     'kivy.core.audio.audio_android',
@@ -117,7 +117,7 @@ exe = EXE(
     name='Youtube Music Player',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=True,
     upx=True,
     console=False,
     disable_windowed_traceback=False,
@@ -125,7 +125,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['.\\music.png'],
+    icon=['music.ico'],
     optimize=0
 )
 coll = COLLECT(
@@ -134,7 +134,7 @@ coll = COLLECT(
     a.datas,
     *[Tree(p) for p in (sdl2.dep_bins + glew.dep_bins + gstreamer.dep_bins)],
     strip=False,
-    upx=False,
+    upx=True,
     upx_exclude=[],
     name='Youtube Music Player',
 )
