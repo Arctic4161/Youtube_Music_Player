@@ -10,7 +10,7 @@ if utils.get_platform() == 'android':
 else:
     os.environ["KIVY_HOME"] = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded')
     os.environ['KIVY_AUDIO'] = 'gstplayer'
-os.environ["KIVY_NO_CONSOLELOG"] = "1"
+#os.environ["KIVY_NO_CONSOLELOG"] = "1"
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
 from kivy import platform
@@ -92,8 +92,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             from android import mActivity
             context = mActivity.getApplicationContext()
             SERVICE_NAME = f'{str(context.getPackageName())}.ServiceMusicservice'
+            GUILayout.service_activity = autoclass('org.kivy.android.PythonActivity').mActivity
             service = autoclass(SERVICE_NAME)
-            service.start(mActivity, '')
+            service.start(GUILayout.service_activity, '')
             GUILayout.service = service
         elif platform in ('linux', 'linux2', 'macos', 'win'):
             from runpy import run_path
@@ -122,35 +123,25 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         server.bind(u'/reset_gui', self.reset_gui)
         server.bind(u'/file_is_downloaded', self.file_is_downloaded)
         server.bind(u'/data_info', self.update_info)
+        server.bind(u'/are_we', self.check_are_we_playing)
         GUILayout.client = OSCClient(u'localhost', 3000, encoding='utf8')
         GUILayout.song_local = [0]
         GUILayout.slider = None
         GUILayout.playing_song = False
+        GUILayout.check_are_play = None
         self.loadingosctimer = Clock.schedule_interval(self.waitingforoscload, 1)
         self.fire_stop = Clock.schedule_interval(self.checking_for_stop, 1)
+        GUILayout.gui_resume_check = Clock.schedule_interval(self.set_gui_from_check, 1)
         GUILayout.get_update_slider = Clock.schedule_interval(self.wait_update_slider, 1)
 
-    def on_pause(self):
-        GUILayout.get_update_slider.cancel()
-        return True
-
-    def on_resume(self):
-        GUILayout.send('iamawake', 'Heelloo')
-        if GUILayout.playing_song:
-            self.set_gui_resume(0, True, False, 1)
-            self.update_image()
-            GUILayout.get_update_slider()
-        else:
-            self.set_gui_resume(1, False, True, 0)
-
-    def set_gui_resume(self, arg0, arg1, arg2, arg3):
+    @staticmethod
+    def set_gui_resume(arg0, arg1, arg2, arg3):
         MDApp.get_running_app().root.ids.play_btt.opacity = arg0
         MDApp.get_running_app().root.ids.play_btt.disabled = arg1
         MDApp.get_running_app().root.ids.pause_btt.disabled = arg2
         MDApp.get_running_app().root.ids.pause_btt.opacity = arg3
         MDApp.get_running_app().root.ids.next_btt.disabled = arg2
         MDApp.get_running_app().root.ids.previous_btt.disabled = arg2
-        MDApp.get_running_app().root.ids.repeat_btt.opacity = arg3
 
     def second_screen(self):
         songs = self.get_play_list()
@@ -494,6 +485,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def pause(self):
         self.paused = True
+        GUILayout.playing_song = False
         GUILayout.get_update_slider.cancel()
         GUILayout.send('pause', 'pause')
         MDApp.get_running_app().root.ids.pause_btt.disabled = True
@@ -502,7 +494,22 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.pause_btt.opacity = 0
 
     def reset_gui(self, *val):
+        GUILayout.playing_song = False
         self.fire_off_stop = True
+
+    def check_are_we_playing(self, *val):
+        GUILayout.check_are_play = ''.join(val)
+
+    def set_gui_from_check(self, dt):
+        if GUILayout.check_are_play == 'False':
+            GUILayout.set_gui_resume(0, True, False, 1)
+            GUILayout.gui_resume_check.cancel()
+        elif GUILayout == 'True':
+            GUILayout.set_gui_resume(1, False, True, 0)
+            GUILayout.gui_resume_check.cancel()
+        elif GUILayout.set_gui_resume is None:
+            pass
+
 
     def stop(self):
         if GUILayout.playing_song is False:
@@ -567,6 +574,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             GUILayout.client.send_message(u'/get_update_slider', message)
         elif message_type == "downloadyt":
             GUILayout.client.send_message(u'/downloadyt', message)
+        elif message_type == "iampaused":
+            GUILayout.client.send_message(u'/iampaused', message)
 
 
 class Musicapp(MDApp):
@@ -582,7 +591,7 @@ class Musicapp(MDApp):
     def stop_service(self):
         if GUILayout.service:
             if platform == "android":
-                GUILayout.service.stop(GUILayout.mActivity)
+                GUILayout.service.stop(GUILayout.service_activity)
             elif platform in ('linux', 'linux2', 'macos', 'win'):
                 # thread is deamon should stop when main thread ends
                 return
@@ -591,6 +600,14 @@ class Musicapp(MDApp):
                     "service start not implemented on this platform"
                 )
             GUILayout.service = None
+
+    def on_pause(self):
+        GUILayout.send('iampaused', ':(')
+        return True
+
+    def on_resume(self):
+        GUILayout.gui_resume_check()
+        GUILayout.send('iamawake', 'Heelloo')
 
 
 if __name__ == '__main__':

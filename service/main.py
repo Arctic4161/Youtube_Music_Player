@@ -59,6 +59,7 @@ class Gui_sounds():
     sound = None
     paused = False
     checking_it = None
+    main_paused = True
 
     @staticmethod
     def load(*val):
@@ -126,6 +127,9 @@ class Gui_sounds():
                     Gui_sounds.checking_it = None
                     break
                 Gui_sounds.next()
+            elif Gui_sounds.main_paused and Gui_sounds.sound is not None:
+                if Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1:
+                    Gui_sounds.next()
             time.sleep(1)
 
     def update_slider(self, *val):
@@ -159,6 +163,9 @@ class Gui_sounds():
         Gui_sounds.paused = True
         Gui_sounds.song_local = [Gui_sounds.sound.get_pos()]
         Gui_sounds.sound.stop()
+        
+    def pause_val(self, *val):
+        Gui_sounds.main_paused = True
 
     @staticmethod
     def stop(*val):
@@ -238,7 +245,10 @@ class Gui_sounds():
         Gui_sounds.playlist = ''.join(val[1:-1]).strip("'").split("', '")
 
     def refresh_gui(self, *val):
-        Gui_sounds.send("update_image", [Gui_sounds.set_local])
+        Gui_sounds.main_paused = False
+        if Gui_sounds.load_from_service:
+            Gui_sounds.send("update_image", [Gui_sounds.set_local])
+        Gui_sounds.send("are_we", Gui_sounds.paused)
 
     def loop(self, *val):
         Gui_sounds.looping_bool = ''.join(val)
@@ -269,6 +279,8 @@ class Gui_sounds():
             CLIENT.send_message(u'/file_is_downloaded', message)
         elif message_type == "data_info":
             CLIENT.send_message(u'/data_info', message)
+        elif message_type == "are_we":
+            CLIENT.send_message(u'/are_we', message)
 
 
 if __name__ == '__main__':
@@ -288,5 +300,6 @@ if __name__ == '__main__':
     SERVER.bind(u'/shuffle', Gui_sounds.shuffle)
     SERVER.bind(u'/get_update_slider', Gui_sounds.update_slider)
     SERVER.bind(u'/downloadyt', Gui_sounds.download_yt)
+    SERVER.bind(u'/iampaused', Gui_sounds.pause_val)
     while True:
         time.sleep(1)
