@@ -8,9 +8,10 @@ if utils.get_platform() == 'android':
     request_permissions([Permission.INTERNET, Permission.FOREGROUND_SERVICE, Permission.MEDIA_CONTENT_CONTROL,
                          Permission.READ_MEDIA_AUDIO, Permission.POST_NOTIFICATIONS])
 else:
+    os.makedirs(os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded'), exist_ok=True)
     os.environ["KIVY_HOME"] = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded')
     os.environ['KIVY_AUDIO'] = 'gstplayer'
-#os.environ["KIVY_NO_CONSOLELOG"] = "1"
+os.environ["KIVY_NO_CONSOLELOG"] = "1"
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
 from kivy import platform
@@ -57,11 +58,11 @@ class MySlider(MDSlider):
 class GUILayout(MDFloatLayout, MDGridLayout):
     image_path = StringProperty(os.path.join(os.path.dirname(__file__), 'music.png'))
     if platform != "android":
-        set_local_download = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded',
-                                          'Played')
+        set_local_download = os.path.normpath(os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded',
+                                          'Played'))
     else:
         set_local_download = f'{os.getcwd()}//Downloaded//Played'
-    os.makedirs(set_local_download, exist_ok=True)
+    os.makedirs(set_local_download)
 
     def __draw_shadow__(self, origin, end, context=None):
         pass
