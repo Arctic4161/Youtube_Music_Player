@@ -62,7 +62,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                                           'Played'))
     else:
         set_local_download = f'{os.getcwd()}//Downloaded//Played'
-    os.makedirs(set_local_download)
+    os.makedirs(set_local_download, exist_ok=True)
 
     def __draw_shadow__(self, origin, end, context=None):
         pass
