@@ -6,7 +6,7 @@ if utils.get_platform() == 'android':
     from android.permissions import request_permissions, Permission
     from jnius import autoclass
     from android.storage import primary_external_storage_path
-    request_permissions([Permission.INTERNET, Permission.FOREGROUND_SERVICE, Permission.WRITE_EXTERNAL_STORAGE,
+    request_permissions([Permission.INTERNET, Permission.FOREGROUND_SERVICE, Permission.MEDIA_CONTENT_CONTROL, Permission.WRITE_EXTERNAL_STORAGE,
                          Permission.READ_EXTERNAL_STORAGE, Permission.READ_MEDIA_AUDIO, Permission.READ_MEDIA_IMAGES])
     os.makedirs(os.path.normpath(os.path.join(primary_external_storage_path(), 'Download', 'Youtube Music Player',
                                               'Downloaded', 'Played')), exist_ok=True)
@@ -323,8 +323,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             MDApp.get_running_app().root.ids.info.text = "Error downloading Music"
             MDApp.get_running_app().root.ids.play_btt.opacity = 1
             MDApp.get_running_app().root.ids.play_btt.disabled = False
-        GUILayout.slider.disabled = True
-        GUILayout.slider.opacity = 0
+        if GUILayout.slider is not None:
+            GUILayout.slider.disabled = True
+            GUILayout.slider.opacity = 0
         MDApp.get_running_app().root.ids.song_position.text = ''
         MDApp.get_running_app().root.ids.song_max.text = ''
         MDApp.get_running_app().root.ids.pause_btt.disabled = True
@@ -356,6 +357,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.fire_stop()
         MDApp.get_running_app().root.ids.play_btt.disabled = True
         MDApp.get_running_app().root.ids.info.text = ""
+        MDApp.get_running_app().root.ids.song_position.text = ''
+        MDApp.get_running_app().root.ids.song_max.text = ''
         self.filetoplay = (
             f"{self.set_local_download}//{self.settitle}"
             if self.settitle.strip()[-4:] == ".m4a"
