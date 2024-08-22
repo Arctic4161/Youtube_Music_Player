@@ -154,6 +154,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.ids.rv.data = [{'text': str(x[:-4])} for x in songs]
 
     def change_screen_item(self, nav_item):
+        self.second_screen2()
         self.ids.bottom_nav.switch_tab(nav_item)
 
     def second_screen2(self):
