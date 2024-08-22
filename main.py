@@ -247,8 +247,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def new_search(self):
         self.shuffle_selected = False
         MDApp.get_running_app().root.ids.shuffle_btt.text_color = 0, 0, 0, 1
-        GUILayout.slider.disabled = True
-        GUILayout.slider.opacity = 0
+        if GUILayout.slider is not None:
+            GUILayout.slider.disabled = True
+            GUILayout.slider.opacity = 0
         self.playlist = False
         self.count = 0
         self.results_loaded = False
