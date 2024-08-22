@@ -6,7 +6,7 @@
 ## Installation
 
 The installation is pretty easy.
-1. Head over to the [Releases](https://github.com/Arctic4161/Youtube_Music_Player/releases) section and download the latest release and run the installer.
+1. Head over to the [Releases](https://github.com/Arctic4161/Youtube_Music_Player/releases) section and download the latest release and run the installer or select the appropiate APK for your android phone.
 <hr>
 
 ## Dependencies
@@ -14,14 +14,14 @@ The installation is pretty easy.
 **Internal Dependency** represents *python libraries/modules* the application relies on.
 <br>
 
-|  Internal Dependency  |  Function  |
-|:--:|:--:|
-|  kivy  | Core of the GUI |
-|  kivymd  |  Material design of the GUI  |
-|  pytube  |  Safe file names for files from youtube  |
-|  yt-dlp  |  youtube downloader  |
-|  kivy-deps.gstreamer  |  Audio Streamer  |
-|  youtube-search-python  |  Youtube search function  |
+|          Internal Dependency           |  Function  |
+|:--------------------------------------:|:--:|
+|                  kivy                  | Core of the GUI |
+|                 kivymd                 |  Material design of the GUI  |
+|                 pytube                 |  Safe file names for files from youtube  |
+|                 yt-dlp                 |  youtube downloader  |
+|          kivy-deps.gstreamer           |  Audio Streamer  |
+| youtube-search-python: Arctic4161 Fork |  Youtube search function  |
 
 Clone the repository, `cd` into the respective directory and run the below command in terminal
 ```console

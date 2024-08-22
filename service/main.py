@@ -12,6 +12,8 @@ if utils.get_platform() == 'android':
     # for running on android service
     os.environ['KIVY_AUDIO'] = 'android'
     from jnius import autoclass
+    from android.storage import primary_external_storage_path
+
     PythonService = autoclass('org.kivy.android.PythonService')
     autoclass('org.jnius.NativeInvocationHandler')
 else:
@@ -31,7 +33,7 @@ class CustomLogger:
             self.info(msg)
 
     def info(self, msg):
-        if "[download]" in msg:
+        if "[download]" in msg and "Destination:" not in msg:
             Gui_sounds.send('data_info', msg)
 
     def error(self, msg):
@@ -49,8 +51,12 @@ class Gui_sounds():
     if utils.get_platform() != "android":
         set_local_download = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded',
                                           'Played')
+        cache_dire = f'{os.getcwd()}//Downloaded'
     else:
-        set_local_download = f'{os.getcwd()}//Downloaded//Played'
+        set_local_download = os.path.normpath(os.path.join(primary_external_storage_path(), 'Download',
+                                                           'Youtube Music Player', 'Downloaded', 'Played'))
+        cache_dire = os.path.normpath(os.path.join(primary_external_storage_path(), 'Download',
+                                                   'Youtube Music Player'))
     shuffle_selected = False
     playlist = False
     song_change = False
@@ -80,7 +86,7 @@ class Gui_sounds():
              "format": 'm4a/bestaudio',
              'logger': CustomLogger(),
              'ignoreerrors': True,
-             'cachedir': f'{os.getcwd()}//Downloaded',
+             'cachedir': Gui_sounds.cache_dire,
              "retries": 20,
              })
         try:
@@ -113,7 +119,6 @@ class Gui_sounds():
             if Gui_sounds.checking_it is None:
                 Gui_sounds.checking_it = Thread(target=Gui_sounds.check_for_next, daemon=True)
                 Gui_sounds.checking_it.start()
-
 
     @staticmethod
     def check_for_next():
@@ -163,7 +168,7 @@ class Gui_sounds():
         Gui_sounds.paused = True
         Gui_sounds.song_local = [Gui_sounds.sound.get_pos()]
         Gui_sounds.sound.stop()
-        
+
     def pause_val(self, *val):
         Gui_sounds.main_paused = True
 

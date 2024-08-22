@@ -1,14 +1,18 @@
 import contextlib
 import os
 import utils
+
 if utils.get_platform() == 'android':
     from android.permissions import request_permissions, Permission
     from jnius import autoclass
-    os.environ["KIVY_HOME"] = f'{os.getcwd()}//Downloaded'
-    request_permissions([Permission.INTERNET, Permission.FOREGROUND_SERVICE, Permission.MEDIA_CONTENT_CONTROL,
-                         Permission.READ_MEDIA_AUDIO, Permission.POST_NOTIFICATIONS])
+    from android.storage import primary_external_storage_path
+    request_permissions([Permission.INTERNET, Permission.FOREGROUND_SERVICE, Permission.WRITE_EXTERNAL_STORAGE,
+                         Permission.READ_EXTERNAL_STORAGE, Permission.READ_MEDIA_AUDIO, Permission.READ_MEDIA_IMAGES])
+    os.makedirs(os.path.normpath(os.path.join(primary_external_storage_path(), 'Download', 'Youtube Music Player',
+                                              'Downloaded', 'Played')), exist_ok=True)
 else:
-    os.makedirs(os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded'), exist_ok=True)
+    os.makedirs(os.path.normpath(os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded'))
+                , exist_ok=True)
     os.environ["KIVY_HOME"] = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded')
     os.environ['KIVY_AUDIO'] = 'gstplayer'
 os.environ["KIVY_NO_CONSOLELOG"] = "1"
@@ -58,10 +62,11 @@ class MySlider(MDSlider):
 class GUILayout(MDFloatLayout, MDGridLayout):
     image_path = StringProperty(os.path.join(os.path.dirname(__file__), 'music.png'))
     if platform != "android":
-        set_local_download = os.path.normpath(os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded',
-                                          'Played'))
+        set_local_download = os.path.normpath(os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player',
+                                                           'Downloaded', 'Played'))
     else:
-        set_local_download = f'{os.getcwd()}//Downloaded//Played'
+        set_local_download = os.path.normpath(os.path.join(primary_external_storage_path(), 'Download',
+                                                           'Youtube Music Player', 'Downloaded', 'Played'))
     os.makedirs(set_local_download, exist_ok=True)
 
     def __draw_shadow__(self, origin, end, context=None):
@@ -242,6 +247,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def new_search(self):
         self.shuffle_selected = False
         MDApp.get_running_app().root.ids.shuffle_btt.text_color = 0, 0, 0, 1
+        GUILayout.slider.disabled = True
+        GUILayout.slider.opacity = 0
         self.playlist = False
         self.count = 0
         self.results_loaded = False
@@ -253,20 +260,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.stop()
         if self.results_loaded is False:
             try:
-                MDApp.get_running_app().root.ids.info.text = ""
                 if MDApp.get_running_app().root.ids.input_box.text != '':
                     self.video_search = VideosSearch(MDApp.get_running_app().root.ids.input_box.text)
                 else:
                     self.video_search = VideosSearch(MDApp.get_running_app().root.ids.song_title.text)
             except TypeError:
-                MDApp.get_running_app().root.ids.info.text = "Error Searching Music"
-                MDApp.get_running_app().root.ids.next_btt.disabled = False
-                MDApp.get_running_app().root.ids.previous_btt.disabled = False
-                MDApp.get_running_app().root.ids.play_btt.opacity = 1
-                MDApp.get_running_app().root.ids.play_btt.disabled = False
-                MDApp.get_running_app().root.ids.pause_btt.disabled = True
-                MDApp.get_running_app().root.ids.pause_btt.opacity = 0
-                self.file_loaded = False
+                self.error_reset("search")
                 return
             self.result = self.video_search.result()
             self.result1 = self.result["result"]
@@ -313,10 +312,30 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.next_btt.opacity = 1
         MDApp.get_running_app().root.ids.previous_btt.opacity = 1
 
+    def error_reset(self, msg):
+        MDApp.get_running_app().root.ids.imageView.source = os.path.join(os.path.dirname(__file__), 'music.png')
+        if msg == "search":
+            MDApp.get_running_app().root.ids.info.text = "Error Searching Music"
+            MDApp.get_running_app().root.ids.play_btt.opacity = 0
+            MDApp.get_running_app().root.ids.play_btt.disabled = True
+        elif msg == "download":
+            MDApp.get_running_app().root.ids.info.text = "Error downloading Music"
+            MDApp.get_running_app().root.ids.play_btt.opacity = 1
+            MDApp.get_running_app().root.ids.play_btt.disabled = False
+        GUILayout.slider.disabled = True
+        GUILayout.slider.opacity = 0
+        MDApp.get_running_app().root.ids.song_position.text = ''
+        MDApp.get_running_app().root.ids.song_max.text = ''
+        MDApp.get_running_app().root.ids.pause_btt.disabled = True
+        MDApp.get_running_app().root.ids.pause_btt.opacity = 0
+        MDApp.get_running_app().root.ids.repeat_btt.disabled = True
+        GUILayout.get_update_slider.cancel()
+        self.paused = False
+        self.file_loaded = False
+
     def download_yt(self):
         MDApp.get_running_app().root.ids.next_btt.disabled = True
         MDApp.get_running_app().root.ids.previous_btt.disabled = True
-
         MDApp.get_running_app().root.ids.info.text = "Downloading audio... Please wait"
         GUILayout.send('downloadyt', [self.setytlink, self.settitle, self.set_local, self.set_local_download])
 
@@ -325,14 +344,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if maybe == 'yep':
             self.file_loaded = True
         elif maybe == 'nope':
-            MDApp.get_running_app().root.ids.info.text = "Error Downloading Music"
-            MDApp.get_running_app().root.ids.next_btt.disabled = False
-            MDApp.get_running_app().root.ids.previous_btt.disabled = False
-            MDApp.get_running_app().root.ids.play_btt.opacity = 1
-            MDApp.get_running_app().root.ids.play_btt.disabled = False
-            MDApp.get_running_app().root.ids.pause_btt.disabled = True
-            MDApp.get_running_app().root.ids.pause_btt.opacity = 0
-            self.file_loaded = False
+            self.error_reset("download")
 
     def update_info(self, *val):
         msg = ''.join(val)
@@ -342,6 +354,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def checkfile(self):
         self.fire_stop()
         MDApp.get_running_app().root.ids.play_btt.disabled = True
+        MDApp.get_running_app().root.ids.info.text = ""
         self.filetoplay = (
             f"{self.set_local_download}//{self.settitle}"
             if self.settitle.strip()[-4:] == ".m4a"
@@ -511,7 +524,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         elif GUILayout.set_gui_resume is None:
             pass
 
-
     def stop(self):
         if GUILayout.playing_song is False:
             return
@@ -616,6 +628,7 @@ if __name__ == '__main__':
                     file.endswith(".part")]
     # Delete old undownloaded files
     for file in python_files:
-        os.remove(file)
+        with contextlib.suppress(PermissionError):
+            os.remove(file)
     Musicapp().run()
     Musicapp().stop_service()
