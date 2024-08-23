@@ -6,8 +6,9 @@ if utils.get_platform() == 'android':
     from android.permissions import request_permissions, Permission
     from jnius import autoclass
     from android.storage import primary_external_storage_path
-    request_permissions([Permission.INTERNET, Permission.FOREGROUND_SERVICE, Permission.MEDIA_CONTENT_CONTROL, Permission.WRITE_EXTERNAL_STORAGE,
-                         Permission.READ_EXTERNAL_STORAGE, Permission.READ_MEDIA_AUDIO, Permission.READ_MEDIA_IMAGES])
+    request_permissions([Permission.INTERNET, Permission.FOREGROUND_SERVICE, Permission.MEDIA_CONTENT_CONTROL,
+                         Permission.WRITE_EXTERNAL_STORAGE, Permission.READ_EXTERNAL_STORAGE,
+                         Permission.READ_MEDIA_AUDIO, Permission.READ_MEDIA_IMAGES])
     os.makedirs(os.path.normpath(os.path.join(primary_external_storage_path(), 'Download', 'Youtube Music Player',
                                               'Downloaded', 'Played')), exist_ok=True)
 else:
@@ -530,8 +531,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             pass
 
     def stop(self):
-        GUILayout.slider.disabled = True
-        GUILayout.slider.opacity = 0
+        if GUILayout.slider is not None:
+            GUILayout.slider.disabled = True
+            GUILayout.slider.opacity = 0
         self.paused = False
         MDApp.get_running_app().root.ids.song_position.text = ''
         MDApp.get_running_app().root.ids.song_max.text = ''
