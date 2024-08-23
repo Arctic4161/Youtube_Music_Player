@@ -530,8 +530,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             pass
 
     def stop(self):
-        if GUILayout.playing_song is False:
-            return
         GUILayout.slider.disabled = True
         GUILayout.slider.opacity = 0
         self.paused = False
@@ -542,7 +540,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.pause_btt.disabled = True
         MDApp.get_running_app().root.ids.pause_btt.opacity = 0
         MDApp.get_running_app().root.ids.repeat_btt.disabled = True
-        GUILayout.send('stop', 'stop music')
+        if GUILayout.playing_song is True:
+            GUILayout.send('stop', 'stop music')
         GUILayout.get_update_slider.cancel()
 
     def next(self):

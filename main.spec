@@ -118,7 +118,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=True,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -134,7 +134,7 @@ coll = COLLECT(
     a.datas,
     *[Tree(p) for p in (sdl2.dep_bins + glew.dep_bins + gstreamer.dep_bins)],
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='Youtube Music Player',
 )
