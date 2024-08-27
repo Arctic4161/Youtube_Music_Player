@@ -43,6 +43,7 @@ class CustomLogger:
 
 
 class Gui_sounds():
+    sounds = None
     length = None
     previous_songs = []
     set_local = None
@@ -122,7 +123,7 @@ class Gui_sounds():
         while True:
             if (Gui_sounds.sound is not None and (Gui_sounds.paused is False or Gui_sounds.sound.state == 'play')
                     and Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1):
-                if Gui_sounds.previous is True:
+                if Gui_sounds.previous is True or Gui_sounds.sound.loop is True:
                     continue
                 if Gui_sounds.playlist is False or Gui_sounds.playlist == 'False':
                     Gui_sounds.send("reset_gui", "reset_gui")
@@ -250,7 +251,10 @@ class Gui_sounds():
         Gui_sounds.main_paused = False
         if Gui_sounds.load_from_service:
             Gui_sounds.send("update_image", [Gui_sounds.set_local])
-        Gui_sounds.send("are_we", Gui_sounds.paused)
+        if Gui_sounds.sound is None:
+            Gui_sounds.send("are_we", "None")
+        else:
+            Gui_sounds.send("are_we", Gui_sounds.paused)
 
     def loop(self, *val):
         Gui_sounds.looping_bool = ''.join(val)

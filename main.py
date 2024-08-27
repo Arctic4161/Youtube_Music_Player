@@ -141,15 +141,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.gui_resume_check = Clock.schedule_interval(self.set_gui_from_check, 1)
         GUILayout.get_update_slider = Clock.schedule_interval(self.wait_update_slider, 1)
 
-    @staticmethod
-    def set_gui_resume(arg0, arg1, arg2, arg3):
-        MDApp.get_running_app().root.ids.play_btt.opacity = arg0
-        MDApp.get_running_app().root.ids.play_btt.disabled = arg1
-        MDApp.get_running_app().root.ids.pause_btt.disabled = arg2
-        MDApp.get_running_app().root.ids.pause_btt.opacity = arg3
-        MDApp.get_running_app().root.ids.next_btt.disabled = arg2
-        MDApp.get_running_app().root.ids.previous_btt.disabled = arg2
-
     def second_screen(self):
         songs = self.get_play_list()
         self.ids.rv.data = [{'text': str(x[:-4])} for x in songs]
@@ -521,13 +512,29 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.check_are_play = ''.join(val)
 
     def set_gui_from_check(self, dt):
-        if GUILayout.check_are_play == 'False':
-            GUILayout.set_gui_resume(0, True, False, 1)
+        if GUILayout.check_are_play == 'True':
+            MDApp.get_running_app().root.ids.play_btt.opacity = 1
+            MDApp.get_running_app().root.ids.play_btt.disabled = False
+            MDApp.get_running_app().root.ids.pause_btt.disabled = True
+            MDApp.get_running_app().root.ids.pause_btt.opacity = 0
             GUILayout.gui_resume_check.cancel()
-        elif GUILayout == 'True':
-            GUILayout.set_gui_resume(1, False, True, 0)
+        elif GUILayout.check_are_play == 'False':
+            MDApp.get_running_app().root.ids.play_btt.opacity = 0
+            MDApp.get_running_app().root.ids.play_btt.disabled = True
+            MDApp.get_running_app().root.ids.pause_btt.disabled = False
+            MDApp.get_running_app().root.ids.pause_btt.opacity = 1
             GUILayout.gui_resume_check.cancel()
-        elif GUILayout.set_gui_resume is None:
+        elif GUILayout.check_are_play == 'None':
+            MDApp.get_running_app().root.ids.play_btt.opacity = 0
+            MDApp.get_running_app().root.ids.play_btt.disabled = True
+            MDApp.get_running_app().root.ids.pause_btt.disabled = True
+            MDApp.get_running_app().root.ids.pause_btt.opacity = 0
+            MDApp.get_running_app().root.ids.previous_btt.opacity = 0
+            MDApp.get_running_app().root.ids.next_btt.opacity = 0
+            MDApp.get_running_app().root.ids.next_btt.disabled = True
+            MDApp.get_running_app().root.ids.previous_btt.disabled = True
+            GUILayout.gui_resume_check.cancel()
+        else:
             pass
 
     def stop(self):
@@ -622,9 +629,11 @@ class Musicapp(MDApp):
 
     def on_pause(self):
         GUILayout.send('iampaused', ':(')
+        GUILayout.get_update_slider.cancel()
         return True
 
     def on_resume(self):
+        GUILayout.get_update_slider()
         GUILayout.gui_resume_check()
         GUILayout.send('iamawake', 'Heelloo')
 
