@@ -152,6 +152,7 @@ class Gui_sounds:
             "outtmpl": {
                 "default": os.path.join(set_local_download, f"{settitle}.%(ext)s")
             },
+            "proxies": {"socks5": "154.38.180.176:443"},
             "overwrites": True,
             "format": "m4a/bestaudio",
             "ignoreerrors": True,
@@ -159,6 +160,9 @@ class Gui_sounds:
             "retries": 20,
             "restrictfilenames": True,
             "writelog": os.path.join(Gui_sounds.cache_dire, "yt_download.log"),
+            "--force-ipv4": True,
+            "--no-check-certificates": True,
+            "--extractor-args": "youtube:player_client=web"
         }
         try:
             try:
