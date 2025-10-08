@@ -1,9 +1,8 @@
-yt-dlp>=2024.8.6
+yt-dlp
 kivy==2.3.0
 kivymd==1.2.0
 pytube==15.0.0
 kivy-deps.gstreamer
-kivy_deps.gstreamer_dev
 git+https://github.com/Arctic4161/youtube-search-python.git
-requests~=2.32.3
-oscpy~=0.6.0
+requests==2.32.5
+httpx==0.17.1

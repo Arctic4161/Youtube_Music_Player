@@ -1,0 +1,104 @@
+
+#:import MDFillRoundFlatIconButton kivymd.uix.button.MDFillRoundFlatIconButton
+#:import MDBottomNavigationItem kivymd.uix.bottomnavigation.MDBottomNavigationItem
+
+<PlaylistItem@BoxLayout>:
+    pid: ""
+    name: ""
+    size_hint_y: None
+    height: dp(48)
+    padding: dp(4), 0
+    spacing: dp(6)
+    Button:
+        text: root.name
+        halign: "left"
+        size_hint_x: 1
+        on_release: app.root._playlist_on_select(root.pid)
+    MDIconButton:
+        icon: "dots-vertical"
+        on_release: app.root._playlist_open_menu(root.pid, root.name)
+
+<TrackItem@BoxLayout>:
+    text: ""
+    index: 0
+    size_hint_y: None
+    height: dp(56)
+    padding: dp(4), 0
+    spacing: dp(6)
+    Button:
+        text: root.text[:48] + "..." if len(root.text) >= 48 else root.text
+        halign: "left"
+        size_hint_x: 1
+        on_release: app.root._playlist_play_index(root.index)
+    MDIconButton:
+        icon: "delete"
+        on_release: app.root._playlist_remove_track(root.index)
+
+<LibraryTab@MDBottomNavigationItem>:
+    # These ids are accessed from Python via self.library_tab.ids[...]
+    name: "Screen 3"
+    text: "Library"
+    MDBoxLayout:
+        orientation: "horizontal"
+        padding: dp(8)
+        spacing: dp(8)
+
+        # LEFT: Playlists list
+        MDCard:
+            radius: dp(16)
+            padding: dp(8)
+            size_hint_x: 0.35
+            MDBoxLayout:
+                orientation: "vertical"
+                spacing: dp(8)
+                MDBoxLayout:
+                    size_hint_y: None
+                    height: dp(40)
+                    MDLabel:
+                        text: "Playlists"
+                        bold: True
+                    MDFillRoundFlatIconButton:
+                        text: "New"
+                        icon: "plus"
+                        on_release: app.root._playlist_prompt_new()
+                RecycleView:
+                    id: rv_playlists
+                    viewclass: "PlaylistItem"
+                    data: []
+                    RecycleBoxLayout:
+                        default_size: None, dp(48)
+                        default_size_hint: 1, None
+                        size_hint_y: None
+                        height: self.minimum_height
+                        orientation: "vertical"
+
+        # RIGHT: Tracks of selected playlist
+        MDCard:
+            radius: dp(16)
+            padding: dp(8)
+            size_hint_x: 0.65
+            MDBoxLayout:
+                orientation: "vertical"
+                spacing: dp(8)
+
+                MDBoxLayout:
+                    size_hint_y: None
+                    height: dp(40)
+                    MDLabel:
+                        id: active_playlist_name
+                        text: "Tracks"
+                        bold: True
+                    MDFillRoundFlatIconButton:
+                        text: "Import"
+                        icon: "file-plus"
+                        on_release: app.root._playlist_import()
+                RecycleView:
+                    id: rv_tracks
+                    viewclass: "TrackItem"
+                    data: []
+                    RecycleBoxLayout:
+                        default_size: None, dp(56)
+                        default_size_hint: 1, None
+                        size_hint_y: None
+                        height: self.minimum_height
+                        orientation: "vertical"

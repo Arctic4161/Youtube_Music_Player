@@ -2,152 +2,257 @@
     MDBottomNavigation:
         id: bottom_nav
         size_hint: 1, 1
+
         MDBottomNavigationItem:
             id: screen_1
             name: "Screen 1"
             text: "Youtube music player"
+
             MDFloatLayout:
                 canvas.before:
                     Color:
-                        rgba: (0, 0, 0, .3)
+                        rgba: 0, 0, 0, 0.3
                     Rectangle:
                         pos: self.pos
                         size: self.size
+
                 size_hint: 1, 1
+
                 MDIconButton:
                     id: search_btt
-                    text: "Search"
                     icon: "search-web"
                     pos_hint: {'center_x': 0.91, 'center_y': 0.93}
-                    theme_text_color: "Custom"
-                    text_color: app.theme_cls.primary_color
+                    theme_icon_color: "Custom"
+                    icon_color: app.theme_cls.primary_color
                     on_press: root.new_search()
+
                 MDTextField:
-	                hint_text: "Round mode"
-                    multiline: False
                     id: input_box
                     hint_text: "Enter Search"
+                    multiline: False
                     size_hint_x: 0.7
                     pos_hint: {'center_x': 0.45, 'center_y': 0.93}
-                    on_focus: self.show_keyboard()
                     on_text_validate: root.new_search()
+
                 MDLabel:
-                    text: ''
                     id: song_title
+                    text: ""
                     font_size: dp(12)
-                    size_hint_y: .03
-                    layout_width: "wrap_content"
-                    padding:[100,100]
-                    pos_hint: {'center_x': .50, 'center_y': .80}
+                    size_hint_y: 0.03
+                    padding: 100, 100
+                    pos_hint: {'center_x': 0.50, 'center_y': 0.80}
+                    theme_text_color: "Custom"
+                    text_color: 1, 1, 1, 1
+
                 MDLabel:
-                    text: ''
                     id: info
+                    text: ""
                     font_size: dp(12)
-                    size_hint_y: .03
-                    pos_hint:{'center_x': 0.60, 'center_y': 0.35}
+                    size_hint_y: 0.03
+                    pos_hint: {'center_x': 0.60, 'center_y': 0.35}
+                    theme_text_color: "Custom"
+                    text_color: 1, 1, 1, 1
+
                 MDLabel:
-                    text: ''
                     id: song_position
-                    size_hint_y: .03
-                    pos_hint:{'center_x': 0.60, 'center_y': 0.3}
+                    text: ""
+                    size_hint_y: 0.03
+                    pos_hint: {'center_x': 0.60, 'center_y': 0.30}
+                    theme_text_color: "Custom"
+                    text_color: 1, 1, 1, 1
+
                 MDLabel:
-                    text: ''
                     id: song_max
-                    pos_hint:{'center_x': 1.30, 'center_y': 0.3}
+                    text: ""
+                    pos_hint: {'center_x': 1.30, 'center_y': 0.30}
+                    theme_text_color: "Custom"
+                    text_color: 1, 1, 1, 1
+
                 MDIconButton:
                     id: shuffle_btt
                     icon: "shuffle"
-                    pos_hint:{'center_x': 0.20, 'center_y': 0.15}
-                    theme_text_color: "Custom"
-                    text_color: (0, 0, 0, 1)
+                    pos_hint: {'center_x': 0.20, 'center_y': 0.15}
+                    theme_icon_color: "Custom"
+                    icon_color: 0, 0, 0, 1
                     on_press: root.shuffle_song_check()
                     opacity: 0
-                    md_bg_color: (0, 0, 0, 0)
+                    md_bg_color: 0, 0, 0, 0
                     disabled: True
+
                 MDIconButton:
                     id: repeat_btt
                     icon: "repeat"
-                    pos_hint:{'center_x': 0.80, 'center_y': 0.15}
-                    theme_text_color: "Custom"
-                    text_color: (0, 0, 0, 1)
+                    pos_hint: {'center_x': 0.80, 'center_y': 0.15}
+                    theme_icon_color: "Custom"
+                    icon_color: 0, 0, 0, 1
                     on_press: root.repeat_songs_check()
                     opacity: 0
-                    md_bg_color: (0, 0, 0, 0)
+                    md_bg_color: 0, 0, 0, 0
                     disabled: True
+
                 MDIconButton:
                     id: pause_btt
                     icon: "pause"
-                    pos_hint:{'center_x': 0.5, 'center_y': 0.15}
+                    pos_hint: {'center_x': 0.5, 'center_y': 0.15}
                     on_press: root.pause()
-                    theme_text_color: "Custom"
+                    theme_icon_color: "Custom"
+                    icon_color: 1, 0, 0, 1
                     opacity: 0
-                    text_color: (1, 0, 0, 1)
-                    md_bg_color: (0, 0, 0, 0)
+                    md_bg_color: 0, 0, 0, 0
                     disabled: True
+
                 MDIconButton:
                     id: play_btt
                     icon: "play"
-                    pos_hint:{'center_x': 0.5, 'center_y': 0.15}
+                    pos_hint: {'center_x': 0.5, 'center_y': 0.15}
                     on_press: root.checkfile()
-                    theme_text_color: "Custom"
+                    theme_icon_color: "Custom"
+                    icon_color: app.theme_cls.primary_color
                     opacity: 0
-                    text_color: app.theme_cls.primary_color
-                    md_bg_color: (0, 0, 0, 0)
+                    md_bg_color: 0, 0, 0, 0
                     disabled: True
+
                 MDIconButton:
                     id: next_btt
                     icon: "skip-next"
-                    pos_hint:{'center_x': 0.65, 'center_y': 0.15}
+                    pos_hint: {'center_x': 0.65, 'center_y': 0.15}
                     on_press: root.next()
-                    md_bg_color: (0, 0, 0, 0)
                     opacity: 0
+                    md_bg_color: 0, 0, 0, 0
                     disabled: True
+
                 MDIconButton:
                     id: previous_btt
                     icon: "skip-previous"
-                    pos_hint:{'center_x': 0.35, 'center_y': 0.15}
+                    pos_hint: {'center_x': 0.35, 'center_y': 0.15}
                     on_press: root.previous()
-                    md_bg_color: (0, 0, 0, 0)
                     opacity: 0
+                    md_bg_color: 0, 0, 0, 0
                     disabled: True
+
                 AsyncImage:
                     id: imageView
-                    pos_hint: {'center_x': .5, 'center_y': .6}
+                    pos_hint: {'center_x': 0.5, 'center_y': 0.6}
                     size_hint_y: 0.3
                     size_hint_x: 0.3
                     source: root.image_path
                     allow_stretch: True
                     mipmap: True
+
         MDBottomNavigationItem:
             name: "Screen 2"
             text: "Playlist"
+
             MDBoxLayout:
                 orientation: "vertical"
-                md_bg_color: (0, 0, 0, 0.3)
+                md_bg_color: 0, 0, 0, 0.3
                 size_hint: 1, 1
+
                 MDLabel:
-                    text: 'Current Playlist'
                     id: play_list
-                    size_hint_y: .06
-                    padding: [10,10]
+                    text: "Current Playlist: Downloaded"
+                    size_hint_y: 0.06
+                    padding: 10, 10
+                    theme_text_color: "Custom"
+                    text_color: 1, 1, 1, 1
+
                 RecycleView:
                     id: rv
-                    viewclass: 'RecycleViewRow'
+                    viewclass: "RecycleViewRow"
+                    bar_width: "6dp"
+                    scroll_type: ["bars", "content"]
+                    do_scroll_x: False
+                    do_scroll_y: True
                     data: []
+
                     RecycleBoxLayout:
-                        default_size: None, dp(56)
+                        default_size: None, dp(76)
                         default_size_hint: 1, None
                         size_hint_y: None
                         height: self.minimum_height
-                        orientation: 'vertical'
+                        orientation: "vertical"
+                        spacing: "8dp"
+                        padding: "8dp"
+
+
 <RecycleViewRow>:
-    orientation: 'horizontal'
-    Button:
-        text: root.text[:48] + "..." if len(root.text) >= 48 else root.text
-        font_size: 0.03 * self.width
-        padding: [10,10]
-        on_press: app.root.getting_song(message=root.text + ".m4a")
-        on_release: app.root.change_screen_item('Screen 1')
-    MDIconButton:
-        icon: "dots-vertical"
-        on_press: app.root.message_box(message=root.text + ".m4a")
+    size_hint_y: None
+    height: "76dp"
+    padding: "6dp"
+
+    MDCard:
+        size_hint: 1, None
+        height: "64dp"
+        radius: [16, 16, 16, 16]
+        elevation: 4
+        ripple_behavior: False
+
+        MDBoxLayout:
+            spacing: "10dp"
+            padding: "8dp"
+
+            AsyncImage:
+                size_hint: None, None
+                size: "48dp", "48dp"
+                source: app.root.set_local_download + "/" + root.text + ".jpg"
+                allow_stretch: True
+                keep_ratio: True
+
+            MDBoxLayout:
+                orientation: "vertical"
+                size_hint_x: 1
+
+                MDLabel:
+                    text: root.text[:60] + "…" if len(root.text) > 60 else root.text
+                    bold: True
+                    halign: "left"
+                    shorten: True
+                    shorten_from: "right"
+
+                MDBoxLayout:
+                    adaptive_height: True
+                    spacing: "4dp"
+
+                    MDLabel:
+                        text: "Tap"
+                        font_style: "Caption"
+                        theme_text_color: "Secondary"
+                        adaptive_size: True
+
+                    MDIcon:
+                        icon: "play"
+                        theme_text_color: "Secondary"
+                        size_hint: None, None
+                        size: "18dp", "18dp"
+
+                    MDLabel:
+                        text: "to play"
+                        font_style: "Caption"
+                        theme_text_color: "Secondary"
+                        adaptive_size: True
+
+                    MDIcon:
+                        icon: "dots-vertical"
+                        theme_text_color: "Secondary"
+                        size_hint: None, None
+                        size: "18dp", "18dp"
+
+                    MDLabel:
+                        text: "for options"
+                        font_style: "Caption"
+                        theme_text_color: "Secondary"
+                        adaptive_size: True
+
+            Widget:
+
+            MDIconButton:
+                icon: "play"
+                tooltip_text: "Play"
+                on_release:
+                    app.root.getting_song(message=root.text + ".m4a")
+                    app.root.change_screen_item("Screen 1")
+
+            MDIconButton:
+                icon: "dots-vertical"
+                tooltip_text: "Options"
+                on_release: app.root.message_box(message=root.text + ".m4a")
