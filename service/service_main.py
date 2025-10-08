@@ -3,69 +3,79 @@ import os.path
 import random
 import time
 from threading import Thread
+
 import requests
 import yt_dlp
+
 import utils
 
-if utils.get_platform() == 'android':
+if utils.get_platform() == "android":
     # for running on android service
-    os.environ['KIVY_AUDIO'] = 'android'
-    from jnius import autoclass
+    os.environ["KIVY_AUDIO"] = "android"
     from android.storage import primary_external_storage_path
-    PythonService = autoclass('org.kivy.android.PythonService')
-    autoclass('org.jnius.NativeInvocationHandler')
-else:
-    os.environ['KIVY_AUDIO'] = 'gstplayer'
-from kivy.core.audio import SoundLoader
-from oscpy.server import OSCThreadServer
-from oscpy.client import OSCClient
+    from jnius import autoclass
 
-CLIENT = OSCClient('localhost', 3002, encoding="utf-8")
+    PythonService = autoclass("org.kivy.android.PythonService")
+    autoclass("org.jnius.NativeInvocationHandler")
+else:
+    os.environ["KIVY_AUDIO"] = "gstplayer"
+from kivy.core.audio import SoundLoader
+from oscpy.client import OSCClient
+from oscpy.server import OSCThreadServer
+
+CLIENT = OSCClient("localhost", 3002, encoding="utf-8")
 
 
 # Foreground service helper for Android
 def _start_in_foreground_if_android():
     try:
-        if utils.get_platform() == 'android':
+        if utils.get_platform() == "android":
             from jnius import autoclass, cast
-            PythonService = autoclass('org.kivy.android.PythonService').mService
-            Context = autoclass('android.content.Context')
-            NotificationManager = autoclass('android.app.NotificationManager')
-            Build = autoclass('android.os.Build')
-            String = autoclass('java.lang.String')
-            NotificationCompat = autoclass('androidx.core.app.NotificationCompat')
-            NotificationChannel = autoclass('android.app.NotificationChannel')
 
-            nm = cast(NotificationManager, PythonService.getSystemService(Context.NOTIFICATION_SERVICE))
-            channel_id = String('music_playback')
+            PythonService = autoclass("org.kivy.android.PythonService").mService
+            Context = autoclass("android.content.Context")
+            NotificationManager = autoclass("android.app.NotificationManager")
+            Build = autoclass("android.os.Build")
+            String = autoclass("java.lang.String")
+            NotificationCompat = autoclass("androidx.core.app.NotificationCompat")
+            NotificationChannel = autoclass("android.app.NotificationChannel")
+
+            nm = cast(
+                NotificationManager,
+                PythonService.getSystemService(Context.NOTIFICATION_SERVICE),
+            )
+            channel_id = String("music_playback")
 
             if Build.VERSION.SDK_INT >= 26:
-                channel = NotificationChannel(channel_id, String('Playback'), NotificationManager.IMPORTANCE_LOW)
+                channel = NotificationChannel(
+                    channel_id, String("Playback"), NotificationManager.IMPORTANCE_LOW
+                )
                 nm.createNotificationChannel(channel)
 
-            builder = NotificationCompat.Builder(PythonService, channel_id)\
-                .setContentTitle('Playing music')\
-                .setContentText('Your music continues in the background')\
-                .setSmallIcon(PythonService.getApplicationInfo().icon)\
+            builder = (
+                NotificationCompat.Builder(PythonService, channel_id)
+                .setContentTitle("Playing music")
+                .setContentText("Your music continues in the background")
+                .setSmallIcon(PythonService.getApplicationInfo().icon)
                 .setOngoing(True)
+            )
 
             notification = builder.build()
             PythonService.startForeground(1, notification)
     except Exception as e:
-        print(f'[service] start_in_foreground failed: {e}')
-
+        print(f"[service] start_in_foreground failed: {e}")
 
 
 class CustomLogger:
     def debug(self, msg):
         # For compatibility with youtube-dl, both debug and info are passed into debug
         # You can distinguish them by the prefix '[debug] '
-        if not msg.startswith('[debug] '):
+        if not msg.startswith("[debug] "):
             self.info(msg)
 
     def info(self, msg):
         if "[download]" in msg and "Destination:" not in msg:
-            Gui_sounds.send('data_info', msg)
+            Gui_sounds.send("data_info", msg)
 
     def error(self, msg):
         print(msg)
@@ -74,19 +84,30 @@ class CustomLogger:
         print(msg)
 
 
-class Gui_sounds():
+class Gui_sounds:
     sounds = None
     length = None
     previous_songs = []
     set_local = None
     load_from_service = False
     if utils.get_platform() != "android":
-        set_local_download = os.path.join(os.path.expanduser('~/Documents'), 'Youtube Music Player', 'Downloaded',
-                                          'Played')
+        set_local_download = os.path.join(
+            os.path.expanduser("~/Documents"),
+            "Youtube Music Player",
+            "Downloaded",
+            "Played",
+        )
     else:
-        set_local_download = os.path.normpath(os.path.join(primary_external_storage_path(), 'Download',
-                                                           'Youtube Music Player', 'Downloaded', 'Played'))
-    cache_dire = os.path.join(os.getcwd(), 'Downloaded')
+        set_local_download = os.path.normpath(
+            os.path.join(
+                primary_external_storage_path(),
+                "Download",
+                "Youtube Music Player",
+                "Downloaded",
+                "Played",
+            )
+        )
+    cache_dire = os.path.join(os.getcwd(), "Downloaded")
     os.makedirs(cache_dire, exist_ok=True)
     shuffle_selected = False
     playlist = []
@@ -99,14 +120,14 @@ class Gui_sounds():
     main_paused = True
     previous = False
     looping_bool = False
-    shuffle_bool = 'False'
+    shuffle_bool = "False"
     shuffle_bag = []  # remaining songs in the current true-shuffle cycle
     _bag_source_len = 0  # tracks length of playlist used to build the bag
 
     @staticmethod
     def load(*val):
         Gui_sounds.stop()
-        Gui_sounds.file_to_load = ''.join(val)
+        Gui_sounds.file_to_load = "".join(val)
         Gui_sounds.file_to_load = os.path.normpath(Gui_sounds.file_to_load)
         Gui_sounds.sound = SoundLoader.load(Gui_sounds.file_to_load)
         if not Gui_sounds.sound:
@@ -114,7 +135,7 @@ class Gui_sounds():
             return
         # Apply persistent loop preference to newly loaded sounds
         try:
-            Gui_sounds.sound.loop = (str(Gui_sounds.looping_bool) == 'True')
+            Gui_sounds.sound.loop = str(Gui_sounds.looping_bool) == "True"
         except Exception:
             pass
         Gui_sounds.length = Gui_sounds.sound.length or 0
@@ -124,17 +145,20 @@ class Gui_sounds():
         Gui_sounds.play()
 
     def download_yt(self, *val):
-        setytlink, settitle, set_local, set_local_download = ''.join(val).strip("']").split("', '")
+        setytlink, settitle, set_local, set_local_download = (
+            "".join(val).strip("']").split("', '")
+        )
         ydl_opts = {
-            "outtmpl": {"default": os.path.join(set_local_download, f"{settitle}.%(ext)s")},
+            "outtmpl": {
+                "default": os.path.join(set_local_download, f"{settitle}.%(ext)s")
+            },
             "overwrites": True,
-
             "format": "m4a/bestaudio",
             "ignoreerrors": True,
             "cachedir": Gui_sounds.cache_dire,
             "retries": 20,
             "restrictfilenames": True,
-            "writelog": os.path.join(Gui_sounds.cache_dire, "yt_download.log")
+            "writelog": os.path.join(Gui_sounds.cache_dire, "yt_download.log"),
         }
         try:
             try:
@@ -149,7 +173,9 @@ class Gui_sounds():
                 img_data = None
                 print(f"[service] thumbnail fetch failed: {e}")
             if img_data:
-                with open(os.path.join(set_local_download, f"{settitle}.jpg"), 'wb') as handler:
+                with open(
+                    os.path.join(set_local_download, f"{settitle}.jpg"), "wb"
+                ) as handler:
                     handler.write(img_data)
             Gui_sounds.send("file_is_downloaded", "yep")
         except Exception as e:
@@ -170,17 +196,22 @@ class Gui_sounds():
             Gui_sounds.sound.play()
             Gui_sounds.previous = False
             if Gui_sounds.checking_it is None:
-                Gui_sounds.checking_it = Thread(target=Gui_sounds.check_for_next, daemon=True)
+                Gui_sounds.checking_it = Thread(
+                    target=Gui_sounds.check_for_next, daemon=True
+                )
                 Gui_sounds.checking_it.start()
 
     @staticmethod
     def check_for_next():
         while True:
-            if (Gui_sounds.sound is not None and (Gui_sounds.paused is False or Gui_sounds.sound.state == 'play')
-                    and Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1):
+            if (
+                Gui_sounds.sound is not None
+                and (Gui_sounds.paused is False or Gui_sounds.sound.state == "play")
+                and Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1
+            ):
                 if Gui_sounds.previous is True or Gui_sounds.sound.loop is True:
                     continue
-                if Gui_sounds.playlist is False or Gui_sounds.playlist == 'False':
+                if Gui_sounds.playlist is False or Gui_sounds.playlist == "False":
                     Gui_sounds.send("reset_gui", "reset_gui")
                     Gui_sounds.checking_it = None
                     break
@@ -210,7 +241,7 @@ class Gui_sounds():
         Gui_sounds.song_local = None
 
     def normalized_1(self, *val):
-        seekingsound = float(''.join(val))
+        seekingsound = float("".join(val))
         with contextlib.suppress(AttributeError):
             try:
                 if Gui_sounds.sound.state != "play":
@@ -235,13 +266,13 @@ class Gui_sounds():
             if isinstance(v, (int, float)):
                 secs = float(v)
             elif isinstance(v, (bytes, bytearray)):
-                secs = float(v.decode('utf-8', 'ignore'))
+                secs = float(v.decode("utf-8", "ignore"))
             elif isinstance(v, str):
                 secs = float(v.strip())
             else:
                 vv = v[0]
                 if isinstance(vv, (bytes, bytearray)):
-                    secs = float(vv.decode('utf-8', 'ignore'))
+                    secs = float(vv.decode("utf-8", "ignore"))
                 else:
                     secs = float(vv)
         except Exception:
@@ -266,6 +297,7 @@ class Gui_sounds():
             # Some backends need a tiny moment after play() before seek()
             if just_started:
                 import time as _time
+
                 _time.sleep(0.05)
 
             # Clamp within known track length if we have it
@@ -289,7 +321,7 @@ class Gui_sounds():
         Gui_sounds.main_paused = True
         Gui_sounds.previous = False
         Gui_sounds.looping_bool = False
-        Gui_sounds.shuffle_bool = 'False'
+        Gui_sounds.shuffle_bool = "False"
 
     @staticmethod
     def stop(*val):
@@ -317,7 +349,9 @@ class Gui_sounds():
     @staticmethod
     def check_song_change(arg0):
         Gui_sounds.song_change = arg0
-        if Gui_sounds.song_change is True and (Gui_sounds.sound is not None and Gui_sounds.sound.state == 'play'):
+        if Gui_sounds.song_change is True and (
+            Gui_sounds.sound is not None and Gui_sounds.sound.state == "play"
+        ):
             Gui_sounds.stop()
         Gui_sounds.retrieving_song()
 
@@ -330,18 +364,31 @@ class Gui_sounds():
                 if Gui_sounds.shuffle_selected is True:
                     # True shuffle: play every track once before reshuffling
                     try:
-                        current = os.path.basename(Gui_sounds.file_to_load) if Gui_sounds.file_to_load else None
+                        current = (
+                            os.path.basename(Gui_sounds.file_to_load)
+                            if Gui_sounds.file_to_load
+                            else None
+                        )
                     except Exception:
                         current = None
                     # Rebuild bag if the playlist changed or bag is empty
-                    need_rebuild = (not Gui_sounds.shuffle_bag) or (Gui_sounds._bag_source_len != len(songs)) \
+                    need_rebuild = (
+                        (not Gui_sounds.shuffle_bag)
+                        or (Gui_sounds._bag_source_len != len(songs))
                         or any(item not in songs for item in Gui_sounds.shuffle_bag)
+                    )
                     if need_rebuild:
                         # Prefer excluding the current so we never immediately repeat
-                        Gui_sounds._rebuild_shuffle_bag(exclude_current=current if len(songs) > 1 else None)
+                        Gui_sounds._rebuild_shuffle_bag(
+                            exclude_current=current if len(songs) > 1 else None
+                        )
                     # If bag is still empty (e.g., single-track playlist), fall back to current
                     try:
-                        next_song = Gui_sounds.shuffle_bag.pop() if Gui_sounds.shuffle_bag else (current or (songs[0] if songs else None))
+                        next_song = (
+                            Gui_sounds.shuffle_bag.pop()
+                            if Gui_sounds.shuffle_bag
+                            else (current or (songs[0] if songs else None))
+                        )
                     except Exception:
                         next_song = current or (songs[0] if songs else None)
                     if next_song:
@@ -386,7 +433,7 @@ class Gui_sounds():
         Gui_sounds.load(Gui_sounds.stream)
 
     def play_list(self, *val):
-        Gui_sounds.playlist = ''.join(val[1:-1]).strip("'").split("', '")
+        Gui_sounds.playlist = "".join(val[1:-1]).strip("'").split("', '")
 
     def refresh_gui(self, *val):
         Gui_sounds.main_paused = False
@@ -396,23 +443,28 @@ class Gui_sounds():
             Gui_sounds.send("are_we", "None")
         else:
             Gui_sounds.send("are_we", Gui_sounds.paused)
+
     @staticmethod
     def loop(*val):
-        Gui_sounds.looping_bool = ''.join(val)
+        Gui_sounds.looping_bool = "".join(val)
         try:
             if Gui_sounds.sound is not None:
-                Gui_sounds.sound.loop = (Gui_sounds.looping_bool == 'True')
+                Gui_sounds.sound.loop = Gui_sounds.looping_bool == "True"
         except Exception:
             pass
 
     @staticmethod
     def shuffle(*val):
-        Gui_sounds.shuffle_bool = ''.join(val)
-        if Gui_sounds.shuffle_bool == 'True':
+        Gui_sounds.shuffle_bool = "".join(val)
+        if Gui_sounds.shuffle_bool == "True":
             Gui_sounds.shuffle_selected = True
             # initialize a fresh shuffle bag, avoid repeating current immediately
             try:
-                current = os.path.basename(Gui_sounds.file_to_load) if Gui_sounds.file_to_load else None
+                current = (
+                    os.path.basename(Gui_sounds.file_to_load)
+                    if Gui_sounds.file_to_load
+                    else None
+                )
             except Exception:
                 current = None
             Gui_sounds._rebuild_shuffle_bag(exclude_current=current)
@@ -434,49 +486,53 @@ class Gui_sounds():
             Gui_sounds.shuffle_bag = []
             Gui_sounds._bag_source_len = 0
             return
-        bag = [s for s in songs if s != exclude_current] if exclude_current else list(songs)
+        bag = (
+            [s for s in songs if s != exclude_current]
+            if exclude_current
+            else list(songs)
+        )
         random.shuffle(bag)
         Gui_sounds.shuffle_bag = bag
         Gui_sounds._bag_source_len = len(songs)
 
     @staticmethod
     def send(message_type, message):
-        message = f'{message}'
+        message = f"{message}"
         if message_type == "normalize":
-            CLIENT.send_message(u'/normalize', message)
+            CLIENT.send_message("/normalize", message)
         elif message_type == "song_pos":
-            CLIENT.send_message(u'/song_pos', message)
+            CLIENT.send_message("/song_pos", message)
         elif message_type == "set_slider":
-            CLIENT.send_message(u'/set_slider', message)
+            CLIENT.send_message("/set_slider", message)
         elif message_type == "update_image":
-            CLIENT.send_message(u'/update_image', message)
+            CLIENT.send_message("/update_image", message)
         elif message_type == "reset_gui":
-            CLIENT.send_message(u'/reset_gui', message)
+            CLIENT.send_message("/reset_gui", message)
         elif message_type == "file_is_downloaded":
-            CLIENT.send_message(u'/file_is_downloaded', message)
+            CLIENT.send_message("/file_is_downloaded", message)
         elif message_type == "data_info":
-            CLIENT.send_message(u'/data_info', message)
+            CLIENT.send_message("/data_info", message)
         elif message_type == "are_we":
-            CLIENT.send_message(u'/are_we', message)
+            CLIENT.send_message("/are_we", message)
 
 
-if __name__ == '__main__':
-    SERVER = OSCThreadServer(encoding='utf8')
-    SERVER.listen('localhost', port=3000, default=True)
-    SERVER.bind(u'/load', Gui_sounds.load)
-    SERVER.bind(u'/play', Gui_sounds.play)
-    SERVER.bind(u'/pause', Gui_sounds.pause)
-    SERVER.bind(u'/stop', Gui_sounds.stop)
-    SERVER.bind(u'/next', Gui_sounds.next)
-    SERVER.bind(u'/previous', Gui_sounds.previous_bttn)
-    SERVER.bind(u'/playlist', Gui_sounds.play_list)
-    SERVER.bind(u'/update_load_fs', Gui_sounds.update_load_fs)
-    SERVER.bind(u'/iamawake', Gui_sounds.refresh_gui)
-    SERVER.bind(u'/loop', Gui_sounds.loop)
-    SERVER.bind(u'/shuffle', Gui_sounds.shuffle)
-    SERVER.bind(u'/get_update_slider', Gui_sounds.update_slider)
-    SERVER.bind(u'/downloadyt', Gui_sounds.download_yt)
-    SERVER.bind(u'/iampaused', Gui_sounds.pause_val)
-    SERVER.bind(u'/seek_seconds', Gui_sounds.seek_seconds)
+if __name__ == "__main__":
+    SERVER = OSCThreadServer(encoding="utf8")
+    SERVER.listen("localhost", port=3000, default=True)
+    SERVER.bind("/load", Gui_sounds.load)
+    SERVER.bind("/play", Gui_sounds.play)
+    SERVER.bind("/pause", Gui_sounds.pause)
+    SERVER.bind("/stop", Gui_sounds.stop)
+    SERVER.bind("/next", Gui_sounds.next)
+    SERVER.bind("/previous", Gui_sounds.previous_bttn)
+    SERVER.bind("/playlist", Gui_sounds.play_list)
+    SERVER.bind("/update_load_fs", Gui_sounds.update_load_fs)
+    SERVER.bind("/iamawake", Gui_sounds.refresh_gui)
+    SERVER.bind("/loop", Gui_sounds.loop)
+    SERVER.bind("/shuffle", Gui_sounds.shuffle)
+    SERVER.bind("/get_update_slider", Gui_sounds.update_slider)
+    SERVER.bind("/downloadyt", Gui_sounds.download_yt)
+    SERVER.bind("/iampaused", Gui_sounds.pause_val)
+    SERVER.bind("/seek_seconds", Gui_sounds.seek_seconds)
     while True:
         time.sleep(1)

@@ -1,8 +1,11 @@
-
 from __future__ import annotations
-import json, uuid, os
-from dataclasses import dataclass, asdict, field
-from typing import List, Dict, Optional
+
+import json
+import os
+import uuid
+from dataclasses import asdict, dataclass, field
+from typing import Dict, List, Optional
+
 
 @dataclass
 class Track:
@@ -11,11 +14,13 @@ class Track:
     duration: float = 0.0
     thumb: Optional[str] = None
 
+
 @dataclass
 class Playlist:
     id: str
     name: str
     tracks: List[Track] = field(default_factory=list)
+
 
 class PlaylistManager:
     def __init__(self, storage_path: str):
@@ -39,15 +44,18 @@ class PlaylistManager:
 
         playlists: List[Playlist] = []
         for p in raw.get("playlists", []):
-            tr = []
-            for t in p.get("tracks", []):
-                # Tolerate missing fields
-                tr.append(Track(
-                    title=t.get("title", os.path.splitext(os.path.basename(t.get("path","")))[0]),
+            tr = [
+                Track(
+                    title=t.get(
+                        "title",
+                        os.path.splitext(os.path.basename(t.get("path", "")))[0],
+                    ),
                     path=t.get("path", ""),
                     duration=t.get("duration", 0.0),
-                    thumb=t.get("thumb")
-                ))
+                    thumb=t.get("thumb"),
+                )
+                for t in p.get("tracks", [])
+            ]
             pl = Playlist(
                 id=p.get("id", str(uuid.uuid4())),
                 name=p.get("name", "Untitled"),
@@ -78,7 +86,7 @@ class PlaylistManager:
             ],
             "active_playlist_id": self.data["active_playlist_id"],
         }
-        tmp = self.storage_path + ".tmp"
+        tmp = f"{self.storage_path}.tmp"
         os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(serial, f, ensure_ascii=False, indent=2)
@@ -86,16 +94,17 @@ class PlaylistManager:
 
     # ---------- helpers ----------
     def _find(self, pid: str) -> Optional[Playlist]:
-        for p in self.data["playlists"]:
-            if p.id == pid:
-                return p
-        return None
+        return next((p for p in self.data["playlists"] if p.id == pid), None)
 
     def list_playlists(self) -> List[Playlist]:
         return list(self.data["playlists"])
 
     def active_playlist(self) -> Optional[Playlist]:
-        return self._find(self.data["active_playlist_id"]) if self.data["active_playlist_id"] else None
+        return (
+            self._find(self.data["active_playlist_id"])
+            if self.data["active_playlist_id"]
+            else None
+        )
 
     def set_active(self, pid: str) -> None:
         if self._find(pid):
@@ -112,15 +121,16 @@ class PlaylistManager:
         return pid
 
     def rename_playlist(self, pid: str, new_name: str) -> None:
-        p = self._find(pid)
-        if p:
+        if p := self._find(pid):
             p.name = (new_name or "").strip() or p.name
             self.save()
 
     def delete_playlist(self, pid: str) -> None:
         self.data["playlists"] = [p for p in self.data["playlists"] if p.id != pid]
         if self.data["active_playlist_id"] == pid:
-            self.data["active_playlist_id"] = self.data["playlists"][0].id if self.data["playlists"] else None
+            self.data["active_playlist_id"] = (
+                self.data["playlists"][0].id if self.data["playlists"] else None
+            )
         self.save()
 
     # ---------- tracks ----------
@@ -139,9 +149,10 @@ class PlaylistManager:
             except Exception:
                 return pth
 
-        existing = set(_norm(getattr(t, "path", "")) for t in p.tracks if getattr(t, "path", ""))
+        existing = {
+            _norm(getattr(t, "path", "")) for t in p.tracks if getattr(t, "path", "")
+        }
         seen_batch = set()
-
         added_any = False
         for path in paths or []:
             if not path:
@@ -154,7 +165,6 @@ class PlaylistManager:
             existing.add(npath)
             seen_batch.add(npath)
             added_any = True
-
         if added_any:
             self.save()
 
