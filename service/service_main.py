@@ -10,7 +10,6 @@ import yt_dlp
 import utils
 
 if utils.get_platform() == "android":
-    # for running on android service
     os.environ["KIVY_AUDIO"] = "android"
     from android.storage import primary_external_storage_path
     from jnius import autoclass
@@ -130,12 +129,10 @@ class Gui_sounds:
         Gui_sounds.file_to_load = "".join(val)
         Gui_sounds.file_to_load = os.path.normpath(Gui_sounds.file_to_load)
         if not os.path.isfile(Gui_sounds.file_to_load):
-            try:
+            with contextlib.suppress(Exception):
                 Gui_sounds.send(
                     "song_not_found", os.path.basename(Gui_sounds.file_to_load)
                 )
-            except Exception:
-                pass
             Gui_sounds.send("reset_gui", "reset_gui")
             return
         Gui_sounds.sound = SoundLoader.load(Gui_sounds.file_to_load)
@@ -143,10 +140,8 @@ class Gui_sounds:
             Gui_sounds.send("reset_gui", "reset_gui")
             return
         # Apply persistent loop preference to newly loaded sounds
-        try:
+        with contextlib.suppress(Exception):
             Gui_sounds.sound.loop = str(Gui_sounds.looping_bool) == "True"
-        except Exception:
-            pass
         Gui_sounds.length = Gui_sounds.sound.length or 0
         Gui_sounds.send("set_slider", str(Gui_sounds.length))
         if Gui_sounds.load_from_service:
@@ -252,22 +247,6 @@ class Gui_sounds:
         Gui_sounds.previous = False
         Gui_sounds.paused = False
         Gui_sounds.song_local = None
-
-    def normalized_1(self, *val):
-        seekingsound = float("".join(val))
-        with contextlib.suppress(AttributeError):
-            try:
-                if Gui_sounds.sound.state != "play":
-                    Gui_sounds.sound.play()
-            except Exception:
-                with contextlib.suppress(Exception):
-                    Gui_sounds.sound.play()
-            Gui_sounds.previous = False
-            Gui_sounds.paused = False
-            Gui_sounds.song_local = None
-            Gui_sounds.sound.seek(seekingsound)
-            with contextlib.suppress(Exception):
-                Gui_sounds.send("song_pos", str(int(seekingsound)))
 
     @staticmethod
     def seek_seconds(*val):

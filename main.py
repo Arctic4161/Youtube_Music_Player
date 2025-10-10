@@ -3,13 +3,13 @@ import os
 
 from kivy.factory import Factory
 from kivy.lang import Builder
+from kivy.uix.scrollview import ScrollView
 from kivymd.toast import toast
-from kivymd.uix.button import MDFlatButton
-from kivymd.uix.dialog import MDDialog
 from kivymd.uix.textfield import MDTextField
 
 import utils
-from playlist_manager import PlaylistManager
+from playlist_manager_saf_wrapper import PlaylistManagerSAF as PlaylistManager
+from storage_access import DownloadsAccess
 
 if utils.get_platform() == "android":
     from android.permissions import Permission, request_permissions
@@ -58,13 +58,17 @@ from threading import Thread
 
 from kivy import platform
 from kivy.clock import Clock, mainthread
+from kivy.core.window import Window
+from kivy.metrics import dp, sp
 from kivy.properties import ObjectProperty, StringProperty
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
-from kivy.uix.popup import Popup
 from kivymd.app import MDApp
+from kivymd.uix.boxlayout import MDBoxLayout
+from kivymd.uix.button import MDFlatButton, MDRaisedButton
+from kivymd.uix.dialog import MDDialog
 from kivymd.uix.floatlayout import MDFloatLayout
 from kivymd.uix.gridlayout import MDGridLayout
+from kivymd.uix.label import MDLabel
 from kivymd.uix.slider import MDSlider
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
@@ -94,7 +98,6 @@ class MySlider(MDSlider):
                 self.set_gui_to_play_from_touchup()
             with contextlib.suppress(Exception):
                 GUILayout.get_update_slider.cancel()
-            from kivy.clock import Clock
 
             GUILayout.get_update_slider = Clock.schedule_interval(
                 GUILayout.wait_update_slider, 1
@@ -242,19 +245,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.get_update_slider.cancel()
 
     def next(self):
-        self.paused = False
-        GUILayout.playing_song = True
-        with contextlib.suppress(Exception):
-            GUILayout.get_update_slider.cancel()
-        GUILayout.get_update_slider = Clock.schedule_interval(
-            GUILayout.wait_update_slider, 1
-        )
-        app = MDApp.get_running_app()
-        app.root.ids.play_btt.disabled = True
-        app.root.ids.play_btt.opacity = 0
-        app.root.ids.pause_btt.disabled = False
-        app.root.ids.pause_btt.opacity = 1
-
+        self.set_next_previous_bttns()
         if self.playlist:
             GUILayout.send("next", self.playlist)
         else:
@@ -262,12 +253,18 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.retrieve_text()
 
     def previous(self):
+        self.set_next_previous_bttns()
+        if self.playlist:
+            GUILayout.send("previous", self.playlist)
+        else:
+            self.count = self.count - 1
+            self.retrieve_text()
+
+    def set_next_previous_bttns(self):
         self.paused = False
         GUILayout.playing_song = True
         with contextlib.suppress(Exception):
             GUILayout.get_update_slider.cancel()
-        from kivy.clock import Clock
-
         GUILayout.get_update_slider = Clock.schedule_interval(
             GUILayout.wait_update_slider, 1
         )
@@ -276,12 +273,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         app.root.ids.play_btt.opacity = 0
         app.root.ids.pause_btt.disabled = False
         app.root.ids.pause_btt.opacity = 1
-
-        if self.playlist:
-            GUILayout.send("previous", self.playlist)
-        else:
-            self.count = self.count - 1
-            self.retrieve_text()
 
     @staticmethod
     def send(message_type, message):
@@ -340,6 +331,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         return names, pname
 
     def _send_active_playlist_to_service(self):
+        # Guard: keep service synced but don't toggle UI unless playing
+        with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):
+                songs, _ = self._active_playlist_song_names()
+                GUILayout.send("playlist", songs)
+        if not getattr(GUILayout, "playing_song", False):
+            return
         songs, _ = self._active_playlist_song_names()
         if len(songs) >= 2:
             self.set_playlist(True, False, 1)
@@ -454,9 +452,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self._playlist_refresh_tracks()
         with contextlib.suppress(Exception):
             toast(f'Created "{name}"')
-        self._update_active_playlist_badge()
-        self._send_active_playlist_to_service()
-        self.second_screen2()
+        self.set_active_playlist_send_to_service()
 
     def _playlist_rename(self, pid: str, new_name: str):
         self._playlist_manager.rename_playlist(
@@ -474,6 +470,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self._playlist_refresh_tracks()
         with contextlib.suppress(Exception):
             toast("Deleted")
+        self.set_active_playlist_send_to_service()
+
+    def set_active_playlist_send_to_service(self):
         self._update_active_playlist_badge()
         self._send_active_playlist_to_service()
         self.second_screen2()
@@ -552,13 +551,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             with contextlib.suppress(Exception):
                 toast("No .m4a files found in your downloads folder")
             return
-
-        # Lazy imports for UI bits
-        from kivy.core.window import Window
-        from kivy.metrics import dp
-        from kivy.uix.scrollview import ScrollView
-        from kivymd.uix.boxlayout import MDBoxLayout
-        from kivymd.uix.gridlayout import MDGridLayout
 
         # Responsive sizing
         visible_h = max(dp(180), min(Window.height * 0.60, dp(420)))
@@ -681,10 +673,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
         paths = [os.path.join(self.set_local_download, fn) for fn in selected]
         before = len(active.tracks)
-        try:
+        with contextlib.suppress(Exception):
             apm.add_tracks(active.id, paths)
-        except Exception:
-            pass
         # Calculate added vs skipped (duplicates)
         added = max(0, len(apm.active_playlist().tracks) - before) if apm else 0
         skipped = max(0, len(paths) - added)
@@ -713,19 +703,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self._playlist_refresh_tracks()
         with contextlib.suppress(Exception):
             toast("Removed")
-        self._send_active_playlist_to_service()
-        self.second_screen2()
-
-    def _playlist_move_track(self, index: int, delta: int):
-        apm = self._playlist_manager
-        pl = apm.active_playlist() if apm else None
-        if not pl:
-            return
-        new_idx = max(0, min(len(pl.tracks) - 1, index + delta))
-        if new_idx == index:
-            return
-        apm.move_track(pl.id, index, new_idx)
-        self._playlist_refresh_tracks()
         self._send_active_playlist_to_service()
         self.second_screen2()
 
@@ -825,7 +802,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             port=3002,
             default=True,
         )
-        # Defensive: ensure callback exists before binding (avoids AttributeError on some load orders)
         if not hasattr(self, "check_are_we_playing") or not callable(
             getattr(self, "check_are_we_playing", None)
         ):
@@ -874,7 +850,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def message_box(self, message):
         """Options popup (Page 2): MDDialog version, same logic (Yes deletes)."""
-        from kivy.metrics import dp
 
         # Build lightweight content
         box = BoxLayout(orientation="vertical", padding=10)
@@ -1147,37 +1122,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def file_is_downloaded(self, *val):
         maybe = "".join(val)
-        if maybe == "yep":
-            self.file_loaded = True
-            # Auto-add the freshly downloaded track to the active playlist
-            try:
-                apm = getattr(self, "_playlist_manager", None)
-                ap = apm.active_playlist() if apm else None
-                if ap:
-                    title = (self.settitle or "").strip()
-                    fname = title if title.endswith(".m4a") else f"{title}.m4a"
-                    full_path = os.path.join(self.set_local_download, fname)
-                    apm.add_tracks(ap.id, [full_path])
-                    # Update Page 3 track list immediately
-                    with contextlib.suppress(Exception):
-                        self._playlist_refresh_tracks()
-            except Exception as _e:
-                pass
-            # Refresh Page 2 (current playlist list) and Page 3 (Library tab)
-            try:
-                self.refresh_playlist()
-            except Exception:
-                pass
-            try:
-                self.second_screen2()
-            except Exception:
-                pass
-            try:
-                self._send_active_playlist_to_service()
-            except Exception:
-                pass
-        elif maybe == "nope":
+        if maybe == "nope":
             self.error_reset("download")
+        elif maybe == "yep":
+            self.sync_playlist_set_load()
 
     def update_info(self, *val):
         msg = "".join(val)
@@ -1197,40 +1145,35 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             else f"{self.set_local_download}//{self.settitle.strip()}.m4a"
         )
         if os.path.isfile(self.filetoplay):
-            self.file_loaded = True
-            # Auto-add the freshly downloaded track to the active playlist
-            try:
-                apm = getattr(self, "_playlist_manager", None)
-                ap = apm.active_playlist() if apm else None
-                if ap:
-                    title = (self.settitle or "").strip()
-                    fname = title if title.endswith(".m4a") else f"{title}.m4a"
-                    full_path = os.path.join(self.set_local_download, fname)
-                    apm.add_tracks(ap.id, [full_path])
-                    # Update Page 3 track list immediately
-                    with contextlib.suppress(Exception):
-                        self._playlist_refresh_tracks()
-            except Exception as _e:
-                pass
-            # Keep Page 2/3 in sync if file already exists
-            try:
-                self.refresh_playlist()
-            except Exception:
-                pass
-            try:
-                self.second_screen2()
-            except Exception:
-                pass
-            try:
-                self._send_active_playlist_to_service()
-            except Exception:
-                pass
+            self.sync_playlist_set_load()
         else:
             self.file_loaded = False
             loadingfile = Thread(target=self.download_yt, daemon=True)
             loadingfile.start()
         self.loadingfiletimer = Clock.schedule_interval(self.waitingforload, 1)
         self.loadingfiletimer()
+
+    def set_title_refresh_playlist(self, apm, ap):
+        title = (self.settitle or "").strip()
+        fname = title if title.endswith(".m4a") else f"{title}.m4a"
+        full_path = os.path.join(self.set_local_download, fname)
+        apm.add_tracks(ap.id, [full_path])
+        with contextlib.suppress(Exception):
+            self._playlist_refresh_tracks()
+
+    def sync_playlist_set_load(self):
+        self.file_loaded = True
+        with contextlib.suppress(Exception):
+            apm = getattr(self, "_playlist_manager", None)
+            ap = apm.active_playlist() if apm else None
+            if ap:
+                self.set_title_refresh_playlist(apm, ap)
+        with contextlib.suppress(Exception):
+            self.refresh_playlist()
+        with contextlib.suppress(Exception):
+            self.second_screen2()
+        with contextlib.suppress(Exception):
+            self._send_active_playlist_to_service()
 
     def waitingforload(self, dt):
         if self.file_loaded is True:
@@ -1252,8 +1195,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.previous_btt.disabled = False
 
     def playing(self):
-        from kivy.clock import Clock
-
         GUILayout.get_update_slider = Clock.schedule_interval(
             self.wait_update_slider, 1
         )
@@ -1268,11 +1209,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.pause_btt.disabled = False
         MDApp.get_running_app().root.ids.play_btt.opacity = 0
         MDApp.get_running_app().root.ids.pause_btt.opacity = 1
-
         MDApp.get_running_app().root.ids.next_btt.opacity = 1
-
         MDApp.get_running_app().root.ids.previous_btt.opacity = 1
-
+        MDApp.get_running_app().root.ids.next_btt.disabled = False
+        MDApp.get_running_app().root.ids.previous_btt.disabled = False
         MDApp.get_running_app().root.ids.repeat_btt.opacity = 1
         GUILayout.playing_song = True
         if self.paused is False:
@@ -1305,7 +1245,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.slider.value = 0
         GUILayout.slider.max = self.length
         MDApp.get_running_app().root.ids.repeat_btt.disabled = False
-
         MDApp.get_running_app().root.ids.repeat_btt.opacity = 1
 
     def set_playlist(self, arg0, arg1, arg2):
@@ -1400,6 +1339,48 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
 
 class Musicapp(MDApp):
+    def on_start(self):
+        # Show Android SAF picker on first boot (or until granted)
+        try:
+            from kivy.clock import Clock
+
+            import utils
+
+            if utils.get_platform() == "android":
+                da = DownloadsAccess()
+                # If no persisted tree URI, prompt the user to grant Downloads access.
+                if not getattr(da, "tree_uri", None):
+                    # Delay slightly to ensure UI is ready before showing dialog
+                    Clock.schedule_once(lambda dt: self.ask_for_downloads_access(), 0.6)
+        except Exception as e:
+            print("on_start SAF prompt error:", e)
+
+    def ask_for_downloads_access(self):
+        """
+        Show Android's folder picker to grant access to public Downloads (SAF).
+        On success, re-initialize the playlist manager so it starts using SAF.
+        Safe to call on desktop; it will no-op.
+        """
+
+        def _done(ok: bool):
+            try:
+                if ok:
+                    from playlist_manager_saf_wrapper import (
+                        PlaylistManagerSAF as PlaylistManager,
+                    )
+
+                    self._playlist_manager = PlaylistManager()
+                    if hasattr(self, "refresh_playlist"):
+                        with contextlib.suppress(Exception):
+                            self.refresh_playlist()
+            except Exception as e:
+                print("SAF grant handler error:", e)
+
+        try:
+            DownloadsAccess().show_permission_popup(on_result=_done)
+        except Exception as e:
+            print("Unable to show Downloads picker:", e)
+
     def build(self):
         self.title = "Youtube Music Player"
         icon = os.path.join(os.path.dirname(__file__), "music.png")
