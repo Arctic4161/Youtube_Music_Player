@@ -129,6 +129,15 @@ class Gui_sounds:
         Gui_sounds.stop()
         Gui_sounds.file_to_load = "".join(val)
         Gui_sounds.file_to_load = os.path.normpath(Gui_sounds.file_to_load)
+        if not os.path.isfile(Gui_sounds.file_to_load):
+            try:
+                Gui_sounds.send(
+                    "song_not_found", os.path.basename(Gui_sounds.file_to_load)
+                )
+            except Exception:
+                pass
+            Gui_sounds.send("reset_gui", "reset_gui")
+            return
         Gui_sounds.sound = SoundLoader.load(Gui_sounds.file_to_load)
         if not Gui_sounds.sound:
             Gui_sounds.send("reset_gui", "reset_gui")
@@ -162,7 +171,7 @@ class Gui_sounds:
             "writelog": os.path.join(Gui_sounds.cache_dire, "yt_download.log"),
             "--force-ipv4": True,
             "--no-check-certificates": True,
-            "--extractor-args": "youtube:player_client=web"
+            "--extractor-args": "youtube:player_client=web",
         }
         try:
             try:
@@ -305,11 +314,9 @@ class Gui_sounds:
                 _time.sleep(0.05)
 
             # Clamp within known track length if we have it
-            try:
+            with contextlib.suppress(Exception):
                 if Gui_sounds.length is not None:
                     secs = max(0.0, min(float(secs), float(Gui_sounds.length) - 0.1))
-            except Exception:
-                pass
             # Seek in seconds
             Gui_sounds.sound.seek(secs)
             # Acknowledge new position to GUI
@@ -451,11 +458,9 @@ class Gui_sounds:
     @staticmethod
     def loop(*val):
         Gui_sounds.looping_bool = "".join(val)
-        try:
+        with contextlib.suppress(Exception):
             if Gui_sounds.sound is not None:
                 Gui_sounds.sound.loop = Gui_sounds.looping_bool == "True"
-        except Exception:
-            pass
 
     @staticmethod
     def shuffle(*val):
@@ -517,6 +522,9 @@ class Gui_sounds:
         elif message_type == "data_info":
             CLIENT.send_message("/data_info", message)
         elif message_type == "are_we":
+            CLIENT.send_message("/are_we", message)
+        elif message_type == "song_not_found":
+            CLIENT.send_message("/song_not_found", message)
             CLIENT.send_message("/are_we", message)
 
 

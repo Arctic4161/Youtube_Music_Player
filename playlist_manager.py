@@ -2,9 +2,48 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
+
+
+# ---- Android-safe writable directory helper (scoped storage friendly) ----
+def _get_app_writable_dir(subdir: str = "") -> str:
+    """
+    Return a writable directory that works on Android (scoped storage) and desktop.
+    Creates the directory if needed.
+
+    Android external (preferred):
+      /storage/emulated/0/Android/data/<package>/files
+    Fallback internal:
+      /data/user/0/<package>/files
+    Desktop:
+      user's home directory.
+    """
+    base = None
+    if sys.platform == "android":
+        try:
+            from android import mActivity  # type: ignore
+
+            ctx = mActivity.getApplicationContext()
+            if ext := ctx.getExternalFilesDir(None):
+                base = ext.getAbsolutePath()
+            else:
+                base = ctx.getFilesDir().getAbsolutePath()
+        except Exception:
+            base = os.path.expanduser("~")
+    else:
+        base = os.path.expanduser("~")
+
+    path = os.path.join(base, subdir) if subdir else base
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+# Default relative subdir that mirrors your previous public Downloads layout.
+DEFAULT_REL_SUBDIR = "Download/Youtube Music Player/Downloaded/Played"
+PLAYLIST_FILENAME = "playlists.json"
 
 
 @dataclass
@@ -23,12 +62,33 @@ class Playlist:
 
 
 class PlaylistManager:
-    def __init__(self, storage_path: str):
+    """
+    Updated to use app-specific storage by default (Android scoped storage-safe) and
+    to migrate from the legacy public Downloads path once, if present.
+
+    Usage:
+        # Old: pm = PlaylistManager("/storage/emulated/0/Download/.../playlists.json")
+        # New (recommended): let it pick an Android-safe path automatically
+        pm = PlaylistManager()
+    """
+
+    def __init__(
+        self, storage_path: Optional[str] = None, rel_subdir: str = DEFAULT_REL_SUBDIR
+    ):
+        # If no explicit path is provided, choose app-specific storage (works on Android 10+)
+        if not storage_path:
+            root = _get_app_writable_dir(rel_subdir)
+            storage_path = os.path.join(root, PLAYLIST_FILENAME)
+
         self.storage_path = storage_path
         self.data: Dict = {
             "playlists": [],
             "active_playlist_id": None,
         }
+
+        # Best-effort one-time migration from the legacy public Downloads path
+        self._migrate_legacy_if_exists(rel_subdir)
+
         self.load()
 
     # ---------- persistence ----------
@@ -90,11 +150,39 @@ class PlaylistManager:
         os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(serial, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.storage_path)
 
     # ---------- helpers ----------
     def _find(self, pid: str) -> Optional[Playlist]:
         return next((p for p in self.data["playlists"] if p.id == pid), None)
+
+    def _migrate_legacy_if_exists(self, rel_subdir: str) -> None:
+        """
+        If an old file under public Downloads exists, copy it into the app dir once.
+        Safe to call even if not present.
+        """
+        # Legacy public path (pre-scoped-storage)
+        legacy_root = os.path.join(
+            "/storage/emulated/0/Download", rel_subdir.replace("Download/", "", 1)
+        )
+        # If rel_subdir already includes "Download/...", keep original logic:
+        if rel_subdir.startswith("Download/"):
+            legacy_root = os.path.join("/storage/emulated/0", rel_subdir)
+
+        legacy_path = os.path.join(legacy_root, PLAYLIST_FILENAME)
+        try:
+            if os.path.exists(legacy_path) and not os.path.exists(self.storage_path):
+                os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
+                with (
+                    open(legacy_path, "r", encoding="utf-8") as src,
+                    open(self.storage_path, "w", encoding="utf-8") as dst,
+                ):
+                    dst.write(src.read())
+        except Exception:
+            # best-effort migration
+            pass
 
     def list_playlists(self) -> List[Playlist]:
         return list(self.data["playlists"])
