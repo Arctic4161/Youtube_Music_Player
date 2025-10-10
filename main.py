@@ -4,9 +4,9 @@ import os
 from kivy.factory import Factory
 from kivy.lang import Builder
 from kivymd.toast import toast
-from kivymd.uix.button import MDFlatButton
-from kivymd.uix.dialog import MDDialog
 from kivymd.uix.textfield import MDTextField
+from kivymd.uix.dialog import MDDialog
+from kivymd.uix.button import MDFlatButton
 
 import utils
 from playlist_manager import PlaylistManager
@@ -125,7 +125,6 @@ class MySlider(MDSlider):
 
 class GUILayout(MDFloatLayout, MDGridLayout):
     gui_reset = False
-
     def on_song_not_found(self, *val):
         # Ensure all UI work happens on the main Kivy thread
         missing = "".join(val).strip() or "Selected track"
@@ -136,7 +135,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 dlg = MDDialog(
                     title="Song not found",
                     text=f'"{missing}" could not be found. It may have been moved or deleted.',
-                    buttons=[MDFlatButton(text="OK")],
+                    buttons=[MDFlatButton(text="OK")]
                 )
                 # Bind dismiss after creation to avoid lambda capturing before dlg exists
                 btn = dlg.buttons[0]
@@ -177,9 +176,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             return
         # image back to app icon
         with contextlib.suppress(Exception):
-            root.ids.imageView.source = os.path.join(
-                os.path.dirname(__file__), "music.png"
-            )
+            root.ids.imageView.source = os.path.join(os.path.dirname(__file__), "music.png")
         # clear text labels
         with contextlib.suppress(Exception):
             root.ids.song_title.text = ""
@@ -205,6 +202,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             with contextlib.suppress(Exception):
                 GUILayout.slider.disabled = True
                 GUILayout.slider.opacity = 0
+
 
     def set_gui_conditions_from_none(self):
         # Keep base visibility consistent, then fully reset visuals
@@ -529,22 +527,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         Open a responsive dialog listing .m4a files in Downloads with checkboxes
         so the user can choose which ones to add to the active playlist.
         """
-        active = (
-            getattr(self, "_playlist_manager", None).active_playlist()
-            if hasattr(self, "_playlist_manager")
-            else None
-        )
+        active = getattr(self, "_playlist_manager", None).active_playlist() if hasattr(self, "_playlist_manager") else None
         if not active:
             with contextlib.suppress(Exception):
                 toast("No active playlist")
             return
 
         try:
-            names = [
-                fn
-                for fn in os.listdir(self.set_local_download)
-                if fn.lower().endswith(".m4a")
-            ]
+            names = [fn for fn in os.listdir(self.set_local_download) if fn.lower().endswith(".m4a")]
         except Exception:
             names = []
 
@@ -554,8 +544,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             return
 
         # Lazy imports for UI bits
-        from kivy.core.window import Window
         from kivy.metrics import dp
+        from kivy.core.window import Window
         from kivy.uix.scrollview import ScrollView
         from kivymd.uix.boxlayout import MDBoxLayout
         from kivymd.uix.gridlayout import MDGridLayout
@@ -566,33 +556,18 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         row_h = dp(36) if small_screen else dp(40)
 
         # Container + filter
-        container = MDBoxLayout(
-            orientation="vertical",
-            spacing=dp(8),
-            padding=[dp(8), dp(8), dp(8), dp(4)],
-            adaptive_height=True,
-        )
-        filter_box = MDTextField(
-            hint_text="Filter by name…",
-            helper_text="Type to filter the list",
-            helper_text_mode="on_focus",
-            size_hint_x=1,
-        )
+        container = MDBoxLayout(orientation="vertical", spacing=dp(8), padding=[dp(8), dp(8), dp(8), dp(4)], adaptive_height=True)
+        filter_box = MDTextField(hint_text="Filter by name…", helper_text="Type to filter the list", helper_text_mode="on_focus", size_hint_x=1)
         container.add_widget(filter_box)
 
         scroll = ScrollView(size_hint=(1, None), height=visible_h)
-        grid = MDGridLayout(
-            cols=1, adaptive_height=True, spacing=dp(6), size_hint_y=None
-        )
+        grid = MDGridLayout(cols=1, adaptive_height=True, spacing=dp(6), size_hint_y=None)
         grid.bind(minimum_height=grid.setter("height"))
 
         # Newest first
         try:
             full_list = [os.path.join(self.set_local_download, n) for n in names]
-            names_sorted = [
-                os.path.basename(i)
-                for i in sorted(full_list, key=os.path.getmtime, reverse=True)
-            ]
+            names_sorted = [os.path.basename(i) for i in sorted(full_list, key=os.path.getmtime, reverse=True)]
         except Exception:
             names_sorted = sorted(names)
 
@@ -600,17 +575,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self._all_rows = []
 
         for fn in names_sorted:
-            row = MDBoxLayout(
-                orientation="horizontal",
-                size_hint_y=None,
-                height=row_h,
-                spacing=dp(10),
-                padding=[dp(2), 0, dp(2), 0],
-            )
+            row = MDBoxLayout(orientation="horizontal", size_hint_y=None, height=row_h, spacing=dp(10), padding=[dp(2), 0, dp(2), 0])
             cb = Factory.MDCheckbox(size_hint=(None, None), size=(dp(24), dp(24)))
-            lbl = Factory.MDLabel(
-                text=fn[:-4], halign="left", shorten=True, shorten_from="right"
-            )
+            lbl = Factory.MDLabel(text=fn[:-4], halign="left", shorten=True, shorten_from="right")
             row.add_widget(cb)
             row.add_widget(lbl)
             grid.add_widget(row)
@@ -639,19 +606,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             size_hint=(None, None),
             width=min(Window.width * 0.90, dp(560)),
             buttons=[
-                MDFlatButton(
-                    text="Select All",
-                    on_release=lambda *_: [
-                        setattr(cb, "active", True) for cb, _ in self._import_items
-                    ],
-                ),
-                MDFlatButton(
-                    text="Add Selected",
-                    on_release=lambda *_: self._confirm_import_selected(),
-                ),
-                MDFlatButton(
-                    text="Cancel", on_release=lambda *_: self._import_dialog.dismiss()
-                ),
+                MDFlatButton(text="Select All", on_release=lambda *_: [setattr(cb, "active", True) for cb, _ in self._import_items]),
+                MDFlatButton(text="Add Selected", on_release=lambda *_: self._confirm_import_selected()),
+                MDFlatButton(text="Cancel", on_release=lambda *_: self._import_dialog.dismiss()),
             ],
         )
         self._import_dialog.open()
@@ -666,11 +623,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             return
 
         try:
-            selected = [
-                fn
-                for cb, fn in getattr(self, "_import_items", [])
-                if getattr(cb, "active", False)
-            ]
+            selected = [fn for cb, fn in getattr(self, "_import_items", []) if getattr(cb, "active", False)]
         except Exception:
             selected = []
 
@@ -696,10 +649,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self._send_active_playlist_to_service()
 
         with contextlib.suppress(Exception):
-            toast(
-                f"Imported {added} track(s)"
-                + (f", skipped {skipped} duplicate(s)" if skipped else "")
-            )
+            toast(f"Imported {added} track(s)" + (f", skipped {skipped} duplicate(s)" if skipped else ""))
 
         with contextlib.suppress(Exception):
             self._import_dialog.dismiss()
@@ -826,13 +776,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             default=True,
         )
         # Defensive: ensure callback exists before binding (avoids AttributeError on some load orders)
-        if not hasattr(self, "check_are_we_playing") or not callable(
-            getattr(self, "check_are_we_playing", None)
-        ):
-
+        if not hasattr(self, 'check_are_we_playing') or not callable(getattr(self, 'check_are_we_playing', None)):
             def _fallback_are_we(*val):
                 with contextlib.suppress(Exception):
-                    GUILayout.check_are_play = "".join(val)
+                    GUILayout.check_are_play = ''.join(val)
 
             self.check_are_we_playing = _fallback_are_we
         server.bind("/set_slider", self.set_slider)
@@ -872,15 +819,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         except Exception as e:
             print(e)
 
+
     def message_box(self, message):
         """Options popup (Page 2): MDDialog version, same logic (Yes deletes)."""
         from kivy.metrics import dp
-
         # Build lightweight content
         box = BoxLayout(orientation="vertical", padding=10)
-        body = Factory.MDLabel(
-            text="Delete this track from disk?", theme_text_color="Secondary"
-        )
+        body = Factory.MDLabel(text="Delete this track from disk?", theme_text_color="Secondary")
         box.add_widget(body)
 
         # Create dialog and store ref for safe dismissal
@@ -891,17 +836,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             size_hint=(None, None),
             width=min(MDApp.get_running_app().root.width * 0.90, dp(560)),
             buttons=[
-                MDFlatButton(
-                    text="NO",
-                    on_release=lambda *_: (
-                        self._current_dialog.dismiss()
-                        if getattr(self, "_current_dialog", None)
-                        else None
-                    ),
-                ),
-                MDFlatButton(
-                    text="Yes", on_release=lambda *_: self.remove_track(message)
-                ),
+                MDFlatButton(text="NO", on_release=lambda *_: (self._current_dialog.dismiss() if getattr(self, "_current_dialog", None) else None)),
+                MDFlatButton(text="Yes", on_release=lambda *_: self.remove_track(message)),
             ],
         )
         self._current_dialog.open()
@@ -1124,6 +1060,15 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             MDApp.get_running_app().root.ids.info.text = "Error downloading Music"
             MDApp.get_running_app().root.ids.play_btt.opacity = 1
             MDApp.get_running_app().root.ids.play_btt.disabled = False
+            # keep shuffle off after a failed download
+            try:
+                app = MDApp.get_running_app()
+                app.root.ids.shuffle_btt.disabled = True
+                app.root.ids.shuffle_btt.opacity = 0
+                self.shuffle_selected = False
+                app.root.ids.shuffle_btt.text_color = (0, 0, 0, 1)
+            except Exception:
+                pass
         if GUILayout.slider is not None:
             GUILayout.slider.disabled = True
             GUILayout.slider.opacity = 0
@@ -1137,6 +1082,15 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.file_loaded = False
 
     def download_yt(self):
+        # 🔒 Disable Shuffle during download
+        try:
+            self.shuffle_selected = False
+            app = MDApp.get_running_app()
+            app.root.ids.shuffle_btt.text_color = (0, 0, 0, 1)
+            app.root.ids.shuffle_btt.disabled = True
+            app.root.ids.shuffle_btt.opacity = 0  # optional: hide while downloading
+        except Exception:
+            pass
         MDApp.get_running_app().root.ids.next_btt.disabled = True
         MDApp.get_running_app().root.ids.previous_btt.disabled = True
         MDApp.get_running_app().root.ids.info.text = "Downloading audio... Please wait"
@@ -1215,9 +1169,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.play_btt.opacity = 0
         MDApp.get_running_app().root.ids.pause_btt.opacity = 1
 
+
         MDApp.get_running_app().root.ids.next_btt.opacity = 1
 
+
         MDApp.get_running_app().root.ids.previous_btt.opacity = 1
+
 
         MDApp.get_running_app().root.ids.repeat_btt.opacity = 1
         GUILayout.playing_song = True
@@ -1251,6 +1208,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.slider.value = 0
         GUILayout.slider.max = self.length
         MDApp.get_running_app().root.ids.repeat_btt.disabled = False
+
 
         MDApp.get_running_app().root.ids.repeat_btt.opacity = 1
 
@@ -1343,7 +1301,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         with contextlib.suppress(Exception):
             self._reset_to_startup_gui()
         Clock.schedule_once(lambda dt: self._reset_to_startup_gui(), 0)
-
 
 class Musicapp(MDApp):
     def build(self):
