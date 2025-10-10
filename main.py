@@ -130,25 +130,21 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     gui_reset = False
 
     def on_song_not_found(self, *val):
-        # Ensure all UI work happens on the main Kivy thread
         missing = "".join(val).strip() or "Selected track"
 
         def _do(dt):
             try:
-                # Create inside main thread
                 dlg = MDDialog(
                     title="Song not found",
                     text=f'"{missing}" could not be found. It may have been moved or deleted.',
                     buttons=[MDFlatButton(text="OK")],
                 )
-                # Bind dismiss after creation to avoid lambda capturing before dlg exists
                 btn = dlg.buttons[0]
                 btn.bind(on_release=lambda *_: dlg.dismiss())
                 dlg.open()
             except Exception:
                 with contextlib.suppress(Exception):
                     toast("Song not found")
-            # Hard reset the GUI to startup
             with contextlib.suppress(Exception):
                 self._reset_to_startup_gui()
 
@@ -169,7 +165,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     @mainthread
     def _reset_to_startup_gui(self):
-        # Restore startup visuals and disable controls
         self.gui_reset = True
         self.paused = False
         GUILayout.playing_song = False
@@ -178,18 +173,15 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             root = app.root
         except Exception:
             return
-        # image back to app icon
         with contextlib.suppress(Exception):
             root.ids.imageView.source = os.path.join(
                 os.path.dirname(__file__), "music.png"
             )
-        # clear text labels
         with contextlib.suppress(Exception):
             root.ids.song_title.text = ""
             root.ids.info.text = ""
             root.ids.song_position.text = ""
             root.ids.song_max.text = ""
-        # hide/disable transport buttons
         with contextlib.suppress(Exception):
             root.ids.play_btt.opacity = 0
             root.ids.play_btt.disabled = True
@@ -203,14 +195,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             root.ids.repeat_btt.opacity = 0
             root.ids.shuffle_btt.disabled = True
             root.ids.shuffle_btt.opacity = 0
-        # slider/state
         if GUILayout.slider is not None:
             with contextlib.suppress(Exception):
                 GUILayout.slider.disabled = True
                 GUILayout.slider.opacity = 0
 
     def set_gui_conditions_from_none(self):
-        # Keep base visibility consistent, then fully reset visuals
         self.set_gui_conditions(0, True, True, 0)
         with contextlib.suppress(Exception):
             MDApp.get_running_app().root.ids.previous_btt.opacity = 0
@@ -331,7 +321,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         return names, pname
 
     def _send_active_playlist_to_service(self):
-        # Guard: keep service synced but don't toggle UI unless playing
         with contextlib.suppress(Exception):
             with contextlib.suppress(Exception):
                 songs, _ = self._active_playlist_song_names()
@@ -362,12 +351,17 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             print("Failed to attach Library tab:", e)
             self.library_tab = None
             return
+
         try:
             storage = os.path.normpath(
                 os.path.join(self.set_local_download, "playlists.json")
             )
         except Exception:
             storage = os.path.join(os.getcwd(), "playlists.json")
+        with contextlib.suppress(Exception):
+            os.makedirs(os.path.dirname(storage), exist_ok=True)
+        with contextlib.suppress(Exception):
+            DownloadsAccess().show_permission_popup()
         self._playlist_manager = PlaylistManager(storage_path=storage)
         self.refresh_playlist()
 
@@ -552,12 +546,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 toast("No .m4a files found in your downloads folder")
             return
 
-        # Responsive sizing
         visible_h = max(dp(180), min(Window.height * 0.60, dp(420)))
         small_screen = Window.height < dp(640)
         row_h = dp(36) if small_screen else dp(40)
 
-        # Container + filter
         container = MDBoxLayout(
             orientation="vertical",
             spacing=dp(8),
@@ -578,7 +570,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         )
         grid.bind(minimum_height=grid.setter("height"))
 
-        # Newest first
         try:
             full_list = [os.path.join(self.set_local_download, n) for n in names]
             names_sorted = [
@@ -612,7 +603,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         scroll.add_widget(grid)
         container.add_widget(scroll)
 
-        # Filter behavior
         def _apply_filter(q_text):
             q = (q_text or "").strip().lower()
             for row, _cb, fn, lbl in self._all_rows:
@@ -623,7 +613,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
         filter_box.bind(text=lambda _w, v: _apply_filter(v))
 
-        # Dialog
         self._import_dialog = MDDialog(
             title="Select tracks to import",
             type="custom",
@@ -675,11 +664,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         before = len(active.tracks)
         with contextlib.suppress(Exception):
             apm.add_tracks(active.id, paths)
-        # Calculate added vs skipped (duplicates)
         added = max(0, len(apm.active_playlist().tracks) - before) if apm else 0
         skipped = max(0, len(paths) - added)
 
-        # Refresh library list and push playlist to service
         with contextlib.suppress(Exception):
             self._playlist_refresh_tracks()
         with contextlib.suppress(Exception):
@@ -693,7 +680,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
         with contextlib.suppress(Exception):
             self._import_dialog.dismiss()
-        # Stay on library page so user sees the newly added items
 
     def _playlist_remove_track(self, index: int):
         active = self._playlist_manager.active_playlist()
@@ -851,14 +837,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def message_box(self, message):
         """Options popup (Page 2): MDDialog version, same logic (Yes deletes)."""
 
-        # Build lightweight content
         box = BoxLayout(orientation="vertical", padding=10)
         body = Factory.MDLabel(
             text="Delete this track from disk?", theme_text_color="Secondary"
         )
         box.add_widget(body)
-
-        # Create dialog and store ref for safe dismissal
         self._current_dialog = MDDialog(
             title="Delete",
             type="custom",
@@ -887,7 +870,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         with contextlib.suppress(PermissionError, FileNotFoundError):
             os.remove(song)
             os.remove(image)
-        # Dismiss any open dialog/popup safely
         with contextlib.suppress(Exception):
             if getattr(self, "_current_dialog", None):
                 self._current_dialog.dismiss()
@@ -1332,7 +1314,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def reset_gui(self, *val):
         GUILayout.playing_song = False
         self.fire_off_stop = True
-        # snap UI back to startup state
         with contextlib.suppress(Exception):
             self._reset_to_startup_gui()
         Clock.schedule_once(lambda dt: self._reset_to_startup_gui(), 0)
@@ -1340,7 +1321,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
 class Musicapp(MDApp):
     def on_start(self):
-        # Show Android SAF picker on first boot (or until granted)
         try:
             from kivy.clock import Clock
 
@@ -1348,9 +1328,7 @@ class Musicapp(MDApp):
 
             if utils.get_platform() == "android":
                 da = DownloadsAccess()
-                # If no persisted tree URI, prompt the user to grant Downloads access.
                 if not getattr(da, "tree_uri", None):
-                    # Delay slightly to ensure UI is ready before showing dialog
                     Clock.schedule_once(lambda dt: self.ask_for_downloads_access(), 0.6)
         except Exception as e:
             print("on_start SAF prompt error:", e)
@@ -1426,7 +1404,6 @@ if __name__ == "__main__":
         for file in os.listdir()
         if file.endswith(".webm") or file.endswith(".ytdl") or file.endswith(".part")
     ]
-    # Delete old undownloaded files
     for file in python_files:
         with contextlib.suppress(PermissionError):
             os.remove(file)

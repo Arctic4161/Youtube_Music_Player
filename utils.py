@@ -14,19 +14,16 @@ def get_platform():
         return None
 
 
-# ---------- Desktop Downloads resolver ----------
 def _desktop_downloads_dir() -> str:
     """
     Return the OS "Downloads" folder on desktop platforms.
     - Windows: uses Known Folders API (FOLDERID_Downloads).
     - macOS/Linux: uses ~/Downloads if present, else ~.
     """
-    # Windows
     if sys.platform.startswith("win"):
         with contextlib.suppress(Exception):
             return find_real_downloads()
         return os.path.join(os.path.expanduser("~"), "Downloads")
-    # macOS/Linux
     cand = os.path.join(os.path.expanduser("~"), "Downloads")
     return cand if os.path.isdir(cand) else os.path.expanduser("~")
 
@@ -35,7 +32,6 @@ def find_real_downloads():
     import ctypes
     from ctypes import wintypes as wt
 
-    # FOLDERID_Downloads = {374DE290-123F-4565-9164-39C4925E467B}
     _FID = wt.GUID("{374DE290-123F-4565-9164-39C4925E467B}")
     buf = wt.LPWSTR()
     ctypes.windll.shell32.SHGetKnownFolderPath(
@@ -44,7 +40,6 @@ def find_real_downloads():
     return buf.value
 
 
-# ---------- App-specific writable directory (Android-safe) ----------
 def get_app_writable_dir(subdir: str = "") -> str:
     """
     Android -> app-specific files dir (scoped storage safe).
@@ -56,8 +51,7 @@ def get_app_writable_dir(subdir: str = "") -> str:
     """
     if sys.platform == "android":
         try:
-            # Provided by python-for-android at runtime
-            from android import mActivity  # type: ignore
+            from android import mActivity
 
             ctx = mActivity.getApplicationContext()
             ext = ctx.getExternalFilesDir(None)
@@ -66,7 +60,6 @@ def get_app_writable_dir(subdir: str = "") -> str:
             base = os.path.expanduser("~")
     elif subdir.lower().startswith(("download/", "downloads/")):
         base = _desktop_downloads_dir()
-        # Strip the leading "download(s)/" so we don't duplicate the directory name
         parts = subdir.split("/", 1)
         subdir = parts[1] if len(parts) > 1 else ""
     else:
