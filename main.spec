@@ -1,113 +1,87 @@
 # -*- mode: python ; coding: utf-8 -*-
-from kivymd import hooks_path as kivymd_hooks_path
-from kivy_deps import sdl2, glew, gstreamer
+# PyInstaller spec for "Youtube Music Player" (Kivy + KivyMD)
+# Includes KV files, service folder, and Kivy/KivyMD data & hooks.
+
+import os
+import sys
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.building.build_main import Analysis, PYZ, EXE, COLLECT
+
+# Optional (Windows/Linux): ship Kivy runtime binaries
+try:
+    from kivy_deps import sdl2, glew, gstreamer
+    _kivy_bins = sdl2.dep_bins + glew.dep_bins + gstreamer.dep_bins
+except Exception:
+    _kivy_bins = []
+
+# KivyMD hook path to ensure icons/fonts are bundled
+try:
+    from kivymd import hooks_path as kivymd_hooks_path
+    _hookspath = [kivymd_hooks_path]
+except Exception:
+    _hookspath = []
+
+# Project root (where main.py lives)
+_project_root = os.path.abspath(os.getcwd())
+
+# ---- Data (non-Python) files ----
+# Your KV files and any other assets must be listed (src, dest)
+_datas = [
+    ('musicapp.kv', '.'),
+    ('library_tab.kv', '.'),
+    ('music.png', '.'),
+    # Add any images/fonts/audio your KV references, e.g.:
+    # ('assets/icons', 'assets/icons'),
+    # ('assets/fonts', 'assets/fonts'),
+]
+
+# Include Kivy/KivyMD framework data files
+_datas += collect_data_files('kivy')
+_datas += collect_data_files('kivymd')
+
+# ---- Hidden imports ----
+_hidden = [] + collect_submodules('kivymd')
+
+# You can add modules discovered only at runtime here, e.g.:
+# _hidden += ['PIL._imaging', 'idna.idnadata']
+
+# ---- Python sources you want to make sure are included ----
+# (If they're imported normally by main.py, this isn't strictly necessary,
+#  but listing here is harmless and sometimes helps on edge cases.)
+_extra_sources = [
+    ('playlist_manager.py', '.'),
+    ('playlist_manager_saf_wrapper.py', '.'),
+    ('storage_access.py', '.'),
+    ('utils.py', '.'),
+    # Service entrypoint lives in a subfolder:
+    ('service/service_main.py', 'service'),
+]
+
+# Convert extra sources to datas so they're shipped alongside the app
+for src, dst in _extra_sources:
+    _datas.append((src, dst))
+
+# Optional icon (Windows/macOS). Put your file next to main.py or adjust path.
+_icon_path = 'music.ico' if os.path.exists('music.ico') else None
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
+    pathex=[_project_root],
     binaries=[],
-    datas=[('./service/main.py', './service'),('utils.py', '.'),('musicapp.kv', '.'), ('music.png', '.')],
-    hiddenimports=['kivy.core',
-    'kivy.core.audio',
-    'kivy.core.audio.audio_android',
-    'kivy.core.audio.audio_avplayer',
-    'kivy.core.audio.audio_ffpyplayer',
-    'kivy.core.audio.audio_gstplayer',
-    'kivy.core.audio.audio_pygame',
-    'kivy.core.audio.audio_sdl2',
-    'kivy.core.camera',
-    'kivy.core.camera.camera_android',
-    'kivy.core.camera.camera_gi',
-    'kivy.core.camera.camera_opencv',
-    'kivy.core.camera.camera_picamera',
-    'kivy.core.clipboard',
-    'kivy.core.clipboard._clipboard_ext',
-    'kivy.core.clipboard._clipboard_sdl2',
-    'kivy.core.clipboard.clipboard_android',
-    'kivy.core.clipboard.clipboard_dbusklipper',
-    'kivy.core.clipboard.clipboard_dummy',
-    'kivy.core.clipboard.clipboard_gtk3',
-    'kivy.core.clipboard.clipboard_nspaste',
-    'kivy.core.clipboard.clipboard_pygame',
-    'kivy.core.clipboard.clipboard_sdl2',
-    'kivy.core.clipboard.clipboard_winctypes',
-    'kivy.core.clipboard.clipboard_xclip',
-    'kivy.core.clipboard.clipboard_xsel',
-    'kivy.core.gl',
-    'kivy.core.image',
-    'kivy.core.image._img_sdl2',
-    'kivy.core.image.img_dds',
-    'kivy.core.image.img_ffpyplayer',
-    'kivy.core.image.img_pil',
-    'kivy.core.image.img_pygame',
-    'kivy.core.image.img_sdl2',
-    'kivy.core.image.img_tex',
-    'kivy.core.spelling',
-    'kivy.core.spelling.spelling_enchant',
-    'kivy.core.spelling.spelling_osxappkit',
-    'kivy.core.text',
-    'kivy.core.text._text_sdl2',
-    'kivy.core.text.markup',
-    'kivy.core.text.text_layout',
-    'kivy.core.text.text_pango',
-    'kivy.core.text.text_pil',
-    'kivy.core.text.text_pygame',
-    'kivy.core.text.text_sdl2',
-    'kivy.core.video',
-    'kivy.core.video.video_ffmpeg',
-    'kivy.core.video.video_ffpyplayer',
-    'kivy.core.video.video_gstplayer',
-    'kivy.core.video.video_null',
-    'kivy.core.window',
-    'kivy.core.window._window_sdl2',
-    'kivy.core.window.window_egl_rpi',
-    'kivy.core.window.window_info',
-    'kivy.core.window.window_pygame',
-    'kivy.core.window.window_sdl2',
-    'kivy.graphics',
-    'kivy.graphics.buffer',
-    'kivy.graphics.cgl',
-    'kivy.graphics.cgl_backend',
-    'kivy.graphics.cgl_backend.cgl_debug',
-    'kivy.graphics.cgl_backend.cgl_gl',
-    'kivy.graphics.cgl_backend.cgl_glew',
-    'kivy.graphics.cgl_backend.cgl_mock',
-    'kivy.graphics.cgl_backend.cgl_sdl2',
-    'kivy.graphics.compiler',
-    'kivy.graphics.context',
-    'kivy.graphics.context_instructions',
-    'kivy.graphics.fbo',
-    'kivy.graphics.gl_instructions',
-    'kivy.graphics.instructions',
-    'kivy.graphics.opengl',
-    'kivy.graphics.opengl_utils',
-    'kivy.graphics.scissor_instructions',
-    'kivy.graphics.shader',
-    'kivy.graphics.stencil_instructions',
-    'kivy.graphics.svg',
-    'kivy.graphics.tesselator',
-    'kivy.graphics.texture',
-    'kivy.graphics.transformation',
-    'kivy.graphics.vbo',
-    'kivy.graphics.vertex',
-    'kivy.graphics.vertex_instructions',
-    'kivy.weakmethod',
-    'kivy.clock',
-    'kivy.context',
-    'kivy.config',
-    'kivy.logger',
-    'kivy.compat',
-    'kivy._clock',
-    'time',
-    'xml.etree.cElementTree'],
-    hookspath=[kivymd_hooks_path],
-    hooksconfig={},
+    datas=_datas,
+    hiddenimports=_hidden,
+    hookspath=_hookspath,
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        # Trim if desired (examples):
+        # 'tkinter', 'pytest', 'unittest', 'matplotlib.tests',
+    ],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
     noarchive=False,
-    optimize=0,
 )
-pyz = PYZ(a.pure)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
 exe = EXE(
     pyz,
@@ -117,24 +91,21 @@ exe = EXE(
     name='Youtube Music Player',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=True,
-    upx=False,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=['music.ico'],
-    optimize=0
+    strip=False,
+    upx=True,
+    console=False,  # set True if you want a console window for logs
+    icon=_icon_path,
 )
+
+# Bundle everything into a folder next to the spec.
 coll = COLLECT(
     exe,
     a.binaries,
+    a.zipfiles,
     a.datas,
-    *[Tree(p) for p in (sdl2.dep_bins + glew.dep_bins + gstreamer.dep_bins)],
+    *([Tree(p) for p in _kivy_bins] if _kivy_bins else []),
     strip=False,
-    upx=False,
+    upx=True,
     upx_exclude=[],
     name='Youtube Music Player',
 )

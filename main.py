@@ -1,8 +1,10 @@
 import contextlib
 import os
+import sys
 
 from kivy.factory import Factory
 from kivy.lang import Builder
+from kivy.resources import resource_add_path, resource_find
 from kivy.uix.scrollview import ScrollView
 from kivymd.toast import toast
 from kivymd.uix.textfield import MDTextField
@@ -10,11 +12,12 @@ from kivymd.uix.textfield import MDTextField
 import utils
 from playlist_manager_saf_wrapper import PlaylistManagerSAF as PlaylistManager
 from storage_access import DownloadsAccess
+from utils import get_app_writable_dir
 
 if utils.get_platform() == "android":
     from android.permissions import Permission, request_permissions
     from android.storage import primary_external_storage_path
-    from jnius import autoclass
+    from jnius import JavaException, autoclass
 
     request_permissions(
         [
@@ -68,7 +71,6 @@ from kivymd.uix.button import MDFlatButton, MDRaisedButton
 from kivymd.uix.dialog import MDDialog
 from kivymd.uix.floatlayout import MDFloatLayout
 from kivymd.uix.gridlayout import MDGridLayout
-from kivymd.uix.label import MDLabel
 from kivymd.uix.slider import MDSlider
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
@@ -130,21 +132,25 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     gui_reset = False
 
     def on_song_not_found(self, *val):
+        # Ensure all UI work happens on the main Kivy thread
         missing = "".join(val).strip() or "Selected track"
 
         def _do(dt):
             try:
+                # Create inside main thread
                 dlg = MDDialog(
                     title="Song not found",
                     text=f'"{missing}" could not be found. It may have been moved or deleted.',
                     buttons=[MDFlatButton(text="OK")],
                 )
+                # Bind dismiss after creation to avoid lambda capturing before dlg exists
                 btn = dlg.buttons[0]
                 btn.bind(on_release=lambda *_: dlg.dismiss())
                 dlg.open()
             except Exception:
                 with contextlib.suppress(Exception):
                     toast("Song not found")
+            # Hard reset the GUI to startup
             with contextlib.suppress(Exception):
                 self._reset_to_startup_gui()
 
@@ -165,6 +171,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     @mainthread
     def _reset_to_startup_gui(self):
+        # Restore startup visuals and disable controls
         self.gui_reset = True
         self.paused = False
         GUILayout.playing_song = False
@@ -173,15 +180,18 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             root = app.root
         except Exception:
             return
+        # image back to app icon
         with contextlib.suppress(Exception):
             root.ids.imageView.source = os.path.join(
                 os.path.dirname(__file__), "music.png"
             )
+        # clear text labels
         with contextlib.suppress(Exception):
             root.ids.song_title.text = ""
             root.ids.info.text = ""
             root.ids.song_position.text = ""
             root.ids.song_max.text = ""
+        # hide/disable transport buttons
         with contextlib.suppress(Exception):
             root.ids.play_btt.opacity = 0
             root.ids.play_btt.disabled = True
@@ -195,12 +205,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             root.ids.repeat_btt.opacity = 0
             root.ids.shuffle_btt.disabled = True
             root.ids.shuffle_btt.opacity = 0
+        # slider/state
         if GUILayout.slider is not None:
             with contextlib.suppress(Exception):
                 GUILayout.slider.disabled = True
                 GUILayout.slider.opacity = 0
 
     def set_gui_conditions_from_none(self):
+        # Keep base visibility consistent, then fully reset visuals
         self.set_gui_conditions(0, True, True, 0)
         with contextlib.suppress(Exception):
             MDApp.get_running_app().root.ids.previous_btt.opacity = 0
@@ -344,6 +356,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             )
 
     def on_kv_post(self, base_widget):
+        with contextlib.suppress(Exception):
+            self._ensure_android_storage_permissions()
         try:
             self.library_tab = Factory.LibraryTab()
             self.ids.bottom_nav.add_widget(self.library_tab)
@@ -351,17 +365,21 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             print("Failed to attach Library tab:", e)
             self.library_tab = None
             return
-
         try:
-            storage = os.path.normpath(
-                os.path.join(self.set_local_download, "playlists.json")
+            storage = (
+                os.path.join(
+                    get_app_writable_dir(
+                        "Download/Youtube Music Player/Downloaded/Played"
+                    ),
+                    "playlists.json",
+                )
+                if platform == "android"
+                else os.path.normpath(
+                    os.path.join(self.set_local_download, "playlists.json")
+                )
             )
         except Exception:
             storage = os.path.join(os.getcwd(), "playlists.json")
-        with contextlib.suppress(Exception):
-            os.makedirs(os.path.dirname(storage), exist_ok=True)
-        with contextlib.suppress(Exception):
-            DownloadsAccess().show_permission_popup()
         self._playlist_manager = PlaylistManager(storage_path=storage)
         self.refresh_playlist()
 
@@ -546,10 +564,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 toast("No .m4a files found in your downloads folder")
             return
 
+        # Responsive sizing
         visible_h = max(dp(180), min(Window.height * 0.60, dp(420)))
         small_screen = Window.height < dp(640)
         row_h = dp(36) if small_screen else dp(40)
 
+        # Container + filter
         container = MDBoxLayout(
             orientation="vertical",
             spacing=dp(8),
@@ -570,6 +590,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         )
         grid.bind(minimum_height=grid.setter("height"))
 
+        # Newest first
         try:
             full_list = [os.path.join(self.set_local_download, n) for n in names]
             names_sorted = [
@@ -603,6 +624,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         scroll.add_widget(grid)
         container.add_widget(scroll)
 
+        # Filter behavior
         def _apply_filter(q_text):
             q = (q_text or "").strip().lower()
             for row, _cb, fn, lbl in self._all_rows:
@@ -613,6 +635,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
         filter_box.bind(text=lambda _w, v: _apply_filter(v))
 
+        # Dialog
         self._import_dialog = MDDialog(
             title="Select tracks to import",
             type="custom",
@@ -664,9 +687,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         before = len(active.tracks)
         with contextlib.suppress(Exception):
             apm.add_tracks(active.id, paths)
+        # Calculate added vs skipped (duplicates)
         added = max(0, len(apm.active_playlist().tracks) - before) if apm else 0
         skipped = max(0, len(paths) - added)
 
+        # Refresh library list and push playlist to service
         with contextlib.suppress(Exception):
             self._playlist_refresh_tracks()
         with contextlib.suppress(Exception):
@@ -680,6 +705,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
         with contextlib.suppress(Exception):
             self._import_dialog.dismiss()
+        # Stay on library page so user sees the newly added items
 
     def _playlist_remove_track(self, index: int):
         active = self._playlist_manager.active_playlist()
@@ -757,14 +783,32 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if platform == "android":
             from android import mActivity
 
-            context = mActivity.getApplicationContext()
-            SERVICE_NAME = f"{str(context.getPackageName())}.ServiceMusicservice"
-            GUILayout.service_activity = autoclass(
-                "org.kivy.android.PythonActivity"
-            ).mActivity
-            service = autoclass(SERVICE_NAME)
-            service.start(GUILayout.service_activity, "")
-            GUILayout.service = service
+            try:
+                PackageManager = autoclass("android.content.pm.PackageManager")
+                pm = mActivity.getPackageManager()
+                pkg = mActivity.getPackageName()
+                info = pm.getPackageInfo(pkg, PackageManager.GET_SERVICES)
+                print("[service] Package:", pkg)
+                if info.services:
+                    print("[service] Manifest declares:")
+                    for s in info.services:
+                        print("  -", s.name)
+                else:
+                    print("[service] No services declared in manifest.")
+            except Exception as e:
+                print("[service] Could not list services:", e)
+            pkg = mActivity.getPackageName()
+            svc_name = "Musicservice"
+            cls = f"{pkg}.Service{svc_name.capitalize()}"
+            try:
+                print("Starting service class:", cls)
+                Service = autoclass(cls)
+                Service.start(mActivity, "")
+                print("Started service:", cls)
+            except JavaException as e:
+                print("Failed to start service (JavaException):", cls, e)
+            except Exception as e:
+                print("Failed to start service (generic):", cls, e)
         elif platform in ("linux", "linux2", "macos", "win"):
             from runpy import run_path
             from threading import Thread
@@ -837,11 +881,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def message_box(self, message):
         """Options popup (Page 2): MDDialog version, same logic (Yes deletes)."""
 
+        # Build lightweight content
         box = BoxLayout(orientation="vertical", padding=10)
         body = Factory.MDLabel(
             text="Delete this track from disk?", theme_text_color="Secondary"
         )
         box.add_widget(body)
+
+        # Create dialog and store ref for safe dismissal
         self._current_dialog = MDDialog(
             title="Delete",
             type="custom",
@@ -870,6 +917,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         with contextlib.suppress(PermissionError, FileNotFoundError):
             os.remove(song)
             os.remove(image)
+        # Dismiss any open dialog/popup safely
         with contextlib.suppress(Exception):
             if getattr(self, "_current_dialog", None):
                 self._current_dialog.dismiss()
@@ -1314,21 +1362,30 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def reset_gui(self, *val):
         GUILayout.playing_song = False
         self.fire_off_stop = True
+        # snap UI back to startup state
         with contextlib.suppress(Exception):
             self._reset_to_startup_gui()
         Clock.schedule_once(lambda dt: self._reset_to_startup_gui(), 0)
 
 
 class Musicapp(MDApp):
+    def _ensure_android_storage_permissions(self):
+        with contextlib.suppress(Exception):
+            da = DownloadsAccess()
+
+            def after_perms(ok):
+                with contextlib.suppress(Exception):
+                    da.show_permission_popup()
+
+            da.request_runtime_permissions(after_perms)
+
     def on_start(self):
         try:
-            from kivy.clock import Clock
-
-            import utils
-
             if utils.get_platform() == "android":
                 da = DownloadsAccess()
+                # If no persisted tree URI, prompt the user to grant Downloads access.
                 if not getattr(da, "tree_uri", None):
+                    # Delay slightly to ensure UI is ready before showing dialog
                     Clock.schedule_once(lambda dt: self.ask_for_downloads_access(), 0.6)
         except Exception as e:
             print("on_start SAF prompt error:", e)
@@ -1366,8 +1423,11 @@ class Musicapp(MDApp):
         self.theme_cls.theme_style = "Light"
         self.theme_cls.primary_palette = "Green"
         self.theme_cls.primary_hue = "500"
+        if getattr(sys, "frozen", False):
+            resource_add_path(sys._MEIPASS)
         try:
-            Builder.load_file("library_tab.kv")
+            p = resource_find("library_tab.kv")
+            Builder.load_file(p)
         except Exception as _e:
             print("library_tab.kv load error:", _e)
 
@@ -1404,6 +1464,7 @@ if __name__ == "__main__":
         for file in os.listdir()
         if file.endswith(".webm") or file.endswith(".ytdl") or file.endswith(".part")
     ]
+    # Delete old undownloaded files
     for file in python_files:
         with contextlib.suppress(PermissionError):
             os.remove(file)

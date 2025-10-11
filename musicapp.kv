@@ -136,7 +136,6 @@
                     size_hint_y: 0.3
                     size_hint_x: 0.3
                     source: root.image_path
-                    allow_stretch: True
                     mipmap: True
 
         MDBottomNavigationItem:
@@ -195,8 +194,6 @@
                 size_hint: None, None
                 size: "48dp", "48dp"
                 source: app.root.set_local_download + "/" + root.text + ".jpg"
-                allow_stretch: True
-                keep_ratio: True
 
             MDBoxLayout:
                 orientation: "vertical"

@@ -1,6 +1,7 @@
 import contextlib
 import os.path
 import random
+import sys
 import time
 from threading import Thread
 
@@ -8,6 +9,8 @@ import requests
 import yt_dlp
 
 import utils
+from storage_access import DownloadsAccess
+from utils import get_app_writable_dir
 
 if utils.get_platform() == "android":
     os.environ["KIVY_AUDIO"] = "android"
@@ -25,6 +28,7 @@ from oscpy.server import OSCThreadServer
 CLIENT = OSCClient("localhost", 3002, encoding="utf-8")
 
 
+# Foreground service helper for Android
 def _start_in_foreground_if_android():
     try:
         if utils.get_platform() == "android":
@@ -117,8 +121,8 @@ class Gui_sounds:
     previous = False
     looping_bool = False
     shuffle_bool = "False"
-    shuffle_bag = []
-    _bag_source_len = 0
+    shuffle_bag = []  # remaining songs in the current true-shuffle cycle
+    _bag_source_len = 0  # tracks length of playlist used to build the bag
 
     @staticmethod
     def load(*val):
@@ -136,6 +140,7 @@ class Gui_sounds:
         if not Gui_sounds.sound:
             Gui_sounds.send("reset_gui", "reset_gui")
             return
+        # Apply persistent loop preference to newly loaded sounds
         with contextlib.suppress(Exception):
             Gui_sounds.sound.loop = str(Gui_sounds.looping_bool) == "True"
         Gui_sounds.length = Gui_sounds.sound.length or 0
@@ -145,12 +150,24 @@ class Gui_sounds:
         Gui_sounds.play()
 
     def download_yt(self, *val):
+
         setytlink, settitle, set_local, set_local_download = (
             "".join(val).strip("']").split("', '")
         )
+
+        # Build yt-dlp options: app-private on Android, otherwise user path
         ydl_opts = {
             "outtmpl": {
-                "default": os.path.join(set_local_download, f"{settitle}.%(ext)s")
+                "default": (
+                    os.path.join(
+                        get_app_writable_dir(
+                            "Download/Youtube Music Player/Downloaded/Played"
+                        ),
+                        f"{settitle}.%(ext)s",
+                    )
+                    if sys.platform == "android"
+                    else os.path.join(set_local_download, f"{settitle}.%(ext)s")
+                )
             },
             "proxies": {"socks5": "154.38.180.176:443"},
             "overwrites": True,
@@ -163,27 +180,80 @@ class Gui_sounds:
             "--force-ipv4": True,
             "--no-check-certificates": True,
             "--extractor-args": "youtube:player_client=web",
+            "logger": CustomLogger(),
         }
+
+        # Download the audio
         try:
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download(setytlink)
-            except Exception as e:
-                Gui_sounds.send("error_reset", f"download failed: {e}")
-                return
-            try:
-                img_data = requests.get(set_local, timeout=30).content
-            except Exception as e:
-                img_data = None
-                print(f"[service] thumbnail fetch failed: {e}")
-            if img_data:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download(setytlink)
+        except Exception as e:
+            Gui_sounds.send("error_reset", f"download failed: {e}")
+            return
+
+        # Try to fetch a thumbnail
+        try:
+            img_data = requests.get(set_local, timeout=30).content
+        except Exception as e:
+            img_data = None
+            print(f"[service] thumbnail fetch failed: {e}")
+
+        # Write thumbnail
+        if img_data:
+            if sys.platform == "android":
+                try:
+                    da = DownloadsAccess()
+                    if da and da.tree_uri:
+                        da.write_bytes(
+                            f"Youtube Music Player/Downloaded/Played/{settitle}.jpg",
+                            img_data,
+                        )
+                    else:
+                        priv_dir = get_app_writable_dir(
+                            "Download/Youtube Music Player/Downloaded/Played"
+                        )
+                        with open(
+                            os.path.join(priv_dir, f"{settitle}.jpg"), "wb"
+                        ) as handler:
+                            handler.write(img_data)
+                except Exception:
+                    with open(
+                        os.path.join(set_local_download, f"{settitle}.jpg"), "wb"
+                    ) as handler:
+                        handler.write(img_data)
+            else:
                 with open(
                     os.path.join(set_local_download, f"{settitle}.jpg"), "wb"
                 ) as handler:
                     handler.write(img_data)
-            Gui_sounds.send("file_is_downloaded", "yep")
-        except Exception as e:
-            Gui_sounds.send("file_is_downloaded", e)
+
+        # Mirror audio into Downloads via SAF if granted (Android only)
+        try:
+            if sys.platform == "android":
+                da = DownloadsAccess()
+                if da and da.tree_uri:
+                    priv_dir = get_app_writable_dir(
+                        "Download/Youtube Music Player/Downloaded/Played"
+                    )
+                    m4a_path = os.path.join(priv_dir, f"{settitle}.m4a")
+                    alt_path = None
+                    if not os.path.exists(m4a_path):
+                        for fn in os.listdir(priv_dir):
+                            if fn.startswith(settitle + "."):
+                                alt_path = os.path.join(priv_dir, fn)
+                                break
+                    src_path = m4a_path if os.path.exists(m4a_path) else alt_path
+                    if src_path and os.path.exists(src_path):
+                        with open(src_path, "rb") as fsrc:
+                            data = fsrc.read()
+                        da.write_bytes(
+                            f"Youtube Music Player/Downloaded/Played/{os.path.basename(src_path)}",
+                            data,
+                        )
+        except Exception as _e:
+            pass
+
+        Gui_sounds.send("file_is_downloaded", "yep")
 
     def update_load_fs(self, *val):
         Gui_sounds.load_from_service = False
@@ -276,15 +346,25 @@ class Gui_sounds:
                 with contextlib.suppress(Exception):
                     Gui_sounds.sound.play()
                     just_started = True
+
+            # Clear pause/previous flags so the player state is consistent
             Gui_sounds.previous = False
             Gui_sounds.paused = False
             Gui_sounds.song_local = None
+
+            # Some backends need a tiny moment after play() before seek()
             if just_started:
-                time.sleep(0.05)
+                import time as _time
+
+                _time.sleep(0.05)
+
+            # Clamp within known track length if we have it
             with contextlib.suppress(Exception):
                 if Gui_sounds.length is not None:
                     secs = max(0.0, min(float(secs), float(Gui_sounds.length) - 0.1))
+            # Seek in seconds
             Gui_sounds.sound.seek(secs)
+            # Acknowledge new position to GUI
             with contextlib.suppress(Exception):
                 Gui_sounds.send("song_pos", str(int(secs)))
 
@@ -338,6 +418,7 @@ class Gui_sounds:
         with contextlib.suppress(TypeError):
             if Gui_sounds.song_change is True:
                 if Gui_sounds.shuffle_selected is True:
+                    # True shuffle: play every track once before reshuffling
                     try:
                         current = (
                             os.path.basename(Gui_sounds.file_to_load)
@@ -346,15 +427,18 @@ class Gui_sounds:
                         )
                     except Exception:
                         current = None
+                    # Rebuild bag if the playlist changed or bag is empty
                     need_rebuild = (
                         (not Gui_sounds.shuffle_bag)
                         or (Gui_sounds._bag_source_len != len(songs))
                         or any(item not in songs for item in Gui_sounds.shuffle_bag)
                     )
                     if need_rebuild:
+                        # Prefer excluding the current so we never immediately repeat
                         Gui_sounds._rebuild_shuffle_bag(
                             exclude_current=current if len(songs) > 1 else None
                         )
+                    # If bag is still empty (e.g., single-track playlist), fall back to current
                     try:
                         next_song = (
                             Gui_sounds.shuffle_bag.pop()
@@ -428,6 +512,7 @@ class Gui_sounds:
         Gui_sounds.shuffle_bool = "".join(val)
         if Gui_sounds.shuffle_bool == "True":
             Gui_sounds.shuffle_selected = True
+            # initialize a fresh shuffle bag, avoid repeating current immediately
             try:
                 current = (
                     os.path.basename(Gui_sounds.file_to_load)

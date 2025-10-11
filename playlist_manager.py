@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -63,9 +64,7 @@ class Playlist:
 
 class PlaylistManager:
     """
-    Updated to use app-specific storage by default (Android scoped storage-safe) and
-    to migrate from the legacy public Downloads path once, if present.
-
+    Updated to use app-specific storage by default (Android scoped storage-safe)
     Usage:
         # Old: pm = PlaylistManager("/storage/emulated/0/Download/.../playlists.json")
         # New (recommended): let it pick an Android-safe path automatically
@@ -75,7 +74,6 @@ class PlaylistManager:
     def __init__(
         self, storage_path: Optional[str] = None, rel_subdir: str = DEFAULT_REL_SUBDIR
     ):
-        # If no explicit path is provided, choose app-specific storage (works on Android 10+)
         if not storage_path:
             root = _get_app_writable_dir(rel_subdir)
             storage_path = os.path.join(root, PLAYLIST_FILENAME)
@@ -85,10 +83,6 @@ class PlaylistManager:
             "playlists": [],
             "active_playlist_id": None,
         }
-
-        # Best-effort one-time migration from the legacy public Downloads path
-        self._migrate_legacy_if_exists(rel_subdir)
-
         self.load()
 
     # ---------- persistence ----------
@@ -157,32 +151,6 @@ class PlaylistManager:
     # ---------- helpers ----------
     def _find(self, pid: str) -> Optional[Playlist]:
         return next((p for p in self.data["playlists"] if p.id == pid), None)
-
-    def _migrate_legacy_if_exists(self, rel_subdir: str) -> None:
-        """
-        If an old file under public Downloads exists, copy it into the app dir once.
-        Safe to call even if not present.
-        """
-        # Legacy public path (pre-scoped-storage)
-        legacy_root = os.path.join(
-            "/storage/emulated/0/Download", rel_subdir.replace("Download/", "", 1)
-        )
-        # If rel_subdir already includes "Download/...", keep original logic:
-        if rel_subdir.startswith("Download/"):
-            legacy_root = os.path.join("/storage/emulated/0", rel_subdir)
-
-        legacy_path = os.path.join(legacy_root, PLAYLIST_FILENAME)
-        try:
-            if os.path.exists(legacy_path) and not os.path.exists(self.storage_path):
-                os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
-                with (
-                    open(legacy_path, "r", encoding="utf-8") as src,
-                    open(self.storage_path, "w", encoding="utf-8") as dst,
-                ):
-                    dst.write(src.read())
-        except Exception:
-            # best-effort migration
-            pass
 
     def list_playlists(self) -> List[Playlist]:
         return list(self.data["playlists"])
