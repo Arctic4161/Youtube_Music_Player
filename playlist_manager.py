@@ -1,48 +1,13 @@
 from __future__ import annotations
 
-import contextlib
 import json
 import os
-import sys
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
+from utils import get_app_writable_dir
 
 
-# ---- Android-safe writable directory helper (scoped storage friendly) ----
-def _get_app_writable_dir(subdir: str = "") -> str:
-    """
-    Return a writable directory that works on Android (scoped storage) and desktop.
-    Creates the directory if needed.
-
-    Android external (preferred):
-      /storage/emulated/0/Android/data/<package>/files
-    Fallback internal:
-      /data/user/0/<package>/files
-    Desktop:
-      user's home directory.
-    """
-    base = None
-    if sys.platform == "android":
-        try:
-            from android import mActivity  # type: ignore
-
-            ctx = mActivity.getApplicationContext()
-            if ext := ctx.getExternalFilesDir(None):
-                base = ext.getAbsolutePath()
-            else:
-                base = ctx.getFilesDir().getAbsolutePath()
-        except Exception:
-            base = os.path.expanduser("~")
-    else:
-        base = os.path.expanduser("~")
-
-    path = os.path.join(base, subdir) if subdir else base
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
-# Default relative subdir that mirrors your previous public Downloads layout.
 DEFAULT_REL_SUBDIR = "Download/Youtube Music Player/Downloaded/Played"
 PLAYLIST_FILENAME = "playlists.json"
 
@@ -66,8 +31,6 @@ class PlaylistManager:
     """
     Updated to use app-specific storage by default (Android scoped storage-safe)
     Usage:
-        # Old: pm = PlaylistManager("/storage/emulated/0/Download/.../playlists.json")
-        # New (recommended): let it pick an Android-safe path automatically
         pm = PlaylistManager()
     """
 
@@ -75,7 +38,7 @@ class PlaylistManager:
         self, storage_path: Optional[str] = None, rel_subdir: str = DEFAULT_REL_SUBDIR
     ):
         if not storage_path:
-            root = _get_app_writable_dir(rel_subdir)
+            root = get_app_writable_dir(rel_subdir)
             storage_path = os.path.join(root, PLAYLIST_FILENAME)
 
         self.storage_path = storage_path
@@ -85,7 +48,6 @@ class PlaylistManager:
         }
         self.load()
 
-    # ---------- persistence ----------
     def load(self) -> None:
         if os.path.exists(self.storage_path):
             try:
@@ -120,7 +82,6 @@ class PlaylistManager:
         self.data["playlists"] = playlists
         self.data["active_playlist_id"] = raw.get("active_playlist_id")
 
-        # If nothing exists, seed a default playlist
         if not playlists:
             self.create_playlist("Favorites")
 
@@ -148,7 +109,6 @@ class PlaylistManager:
             os.fsync(f.fileno())
         os.replace(tmp, self.storage_path)
 
-    # ---------- helpers ----------
     def _find(self, pid: str) -> Optional[Playlist]:
         return next((p for p in self.data["playlists"] if p.id == pid), None)
 
@@ -167,7 +127,6 @@ class PlaylistManager:
             self.data["active_playlist_id"] = pid
             self.save()
 
-    # ---------- playlist CRUD ----------
     def create_playlist(self, name: str) -> str:
         pid = str(uuid.uuid4())
         self.data["playlists"].append(Playlist(id=pid, name=name, tracks=[]))
@@ -189,7 +148,6 @@ class PlaylistManager:
             )
         self.save()
 
-    # ---------- tracks ----------
     def add_tracks(self, pid: str, paths: List[str]) -> None:
         """Add tracks by filesystem path, **skipping duplicates by normalized path**.
         A duplicate is any path that, after os.path.normpath + normcase, already exists in the playlist.

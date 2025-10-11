@@ -68,6 +68,64 @@ def _start_in_foreground_if_android():
         print(f"[service] start_in_foreground failed: {e}")
 
 
+_WAKE = None
+
+
+def acquire_wakelock():
+    """Keep CPU awake while audio is playing (Android only)."""
+    global _WAKE
+    try:
+        if _WAKE:
+            return
+        # If we’re not running as a PythonService on Android, do nothing
+        try:
+            service = autoclass("org.kivy.android.PythonService").mService
+        except Exception:
+            return
+        Context = autoclass("android.content.Context")
+        PowerManager = autoclass("android.os.PowerManager")
+        pm = service.getSystemService(Context.POWER_SERVICE)
+        wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "youtubemusic:player")
+        wl.setReferenceCounted(False)
+        wl.acquire()
+        _WAKE = wl
+    except Exception as e:
+        print("[service] wakelock acquire failed:", e)
+
+
+def release_wakelock():
+    """Release CPU lock when paused/stopped."""
+    global _WAKE
+    try:
+        if _WAKE and _WAKE.isHeld():
+            _WAKE.release()
+    except Exception as e:
+        print("[service] wakelock release failed:", e)
+    _WAKE = None
+
+
+def _enable_auto_restart_if_android():
+    """
+    Ask the Android service wrapper to auto-restart this service if it gets killed.
+    (Support may vary across p4a versions; wrapped in try/except.)
+    """
+    try:
+        service = autoclass("org.kivy.android.PythonService").mService
+        try:
+            service.setAutoRestartService(True)
+            print("[service] Auto-restart enabled")
+        except Exception as e:
+            # Older wrappers may expose it on the class instead of the instance
+            try:
+                autoclass("org.kivy.android.PythonService").setAutoRestartService(True)
+                print("[service] Auto-restart enabled (class method)")
+            except Exception:
+                print("[service] Auto-restart unavailable:", e)
+    except Exception as e:
+        # Non-Android or no service context yet
+        print("[service] Auto-restart setup skipped:", e)
+
+
 class CustomLogger:
     def debug(self, msg):
         if not msg.startswith("[debug] "):
@@ -140,7 +198,7 @@ class Gui_sounds:
         if not Gui_sounds.sound:
             Gui_sounds.send("reset_gui", "reset_gui")
             return
-        # Apply persistent loop preference to newly loaded sounds
+
         with contextlib.suppress(Exception):
             Gui_sounds.sound.loop = str(Gui_sounds.looping_bool) == "True"
         Gui_sounds.length = Gui_sounds.sound.length or 0
@@ -150,12 +208,9 @@ class Gui_sounds:
         Gui_sounds.play()
 
     def download_yt(self, *val):
-
         setytlink, settitle, set_local, set_local_download = (
             "".join(val).strip("']").split("', '")
         )
-
-        # Build yt-dlp options: app-private on Android, otherwise user path
         ydl_opts = {
             "outtmpl": {
                 "default": (
@@ -165,7 +220,7 @@ class Gui_sounds:
                         ),
                         f"{settitle}.%(ext)s",
                     )
-                    if sys.platform == "android"
+                    if utils.get_platform() == "android"
                     else os.path.join(set_local_download, f"{settitle}.%(ext)s")
                 )
             },
@@ -182,25 +237,19 @@ class Gui_sounds:
             "--extractor-args": "youtube:player_client=web",
             "logger": CustomLogger(),
         }
-
-        # Download the audio
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download(setytlink)
         except Exception as e:
             Gui_sounds.send("error_reset", f"download failed: {e}")
             return
-
-        # Try to fetch a thumbnail
         try:
             img_data = requests.get(set_local, timeout=30).content
         except Exception as e:
             img_data = None
             print(f"[service] thumbnail fetch failed: {e}")
-
-        # Write thumbnail
         if img_data:
-            if sys.platform == "android":
+            if utils.get_platform() == "android":
                 try:
                     da = DownloadsAccess()
                     if da and da.tree_uri:
@@ -208,6 +257,13 @@ class Gui_sounds:
                             f"Youtube Music Player/Downloaded/Played/{settitle}.jpg",
                             img_data,
                         )
+                        try:
+                            priv_dir = get_app_writable_dir("Download/Youtube Music Player/Downloaded/Played")
+                            thumb_src = os.path.join(priv_dir, f"{settitle}.jpg")
+                            if os.path.exists(thumb_src):
+                                os.remove(thumb_src)
+                        except Exception as e:
+                            print("[service] thumb cleanup failed:", e)
                     else:
                         priv_dir = get_app_writable_dir(
                             "Download/Youtube Music Player/Downloaded/Played"
@@ -226,34 +282,48 @@ class Gui_sounds:
                     os.path.join(set_local_download, f"{settitle}.jpg"), "wb"
                 ) as handler:
                     handler.write(img_data)
-
-        # Mirror audio into Downloads via SAF if granted (Android only)
-        try:
-            if sys.platform == "android":
+        with contextlib.suppress(Exception):
+            if utils.get_platform() == "android":
                 da = DownloadsAccess()
                 if da and da.tree_uri:
-                    priv_dir = get_app_writable_dir(
-                        "Download/Youtube Music Player/Downloaded/Played"
-                    )
-                    m4a_path = os.path.join(priv_dir, f"{settitle}.m4a")
-                    alt_path = None
-                    if not os.path.exists(m4a_path):
-                        for fn in os.listdir(priv_dir):
-                            if fn.startswith(settitle + "."):
-                                alt_path = os.path.join(priv_dir, fn)
-                                break
-                    src_path = m4a_path if os.path.exists(m4a_path) else alt_path
-                    if src_path and os.path.exists(src_path):
-                        with open(src_path, "rb") as fsrc:
-                            data = fsrc.read()
-                        da.write_bytes(
-                            f"Youtube Music Player/Downloaded/Played/{os.path.basename(src_path)}",
-                            data,
-                        )
-        except Exception as _e:
-            pass
-
+                    self.set_download_directory(settitle, da)
         Gui_sounds.send("file_is_downloaded", "yep")
+
+    def set_download_directory(self, settitle, da):
+        priv_dir = get_app_writable_dir(
+            "Download/Youtube Music Player/Downloaded/Played"
+        )
+        m4a_path = os.path.join(priv_dir, f"{settitle}.m4a")
+        alt_path = None
+        if not os.path.exists(m4a_path):
+            for fn in os.listdir(priv_dir):
+                if fn.startswith(f"{settitle}."):
+                    alt_path = os.path.join(priv_dir, fn)
+                    break
+        file_src_path = m4a_path if os.path.exists(m4a_path) else alt_path
+        if file_src_path and os.path.exists(file_src_path):
+            with open(file_src_path, "rb") as fsrc:
+                data = fsrc.read()
+            da.write_bytes(
+                f"Youtube Music Player/Downloaded/Played/{os.path.basename(file_src_path)}",
+                data,
+            )
+            try:
+                src_path = getattr(self, "file_src_path", None)
+                if src_path and os.path.exists(src_path):
+                    os.remove(src_path)
+                    priv_dir = os.path.dirname(src_path)
+                    base = os.path.basename(src_path)  # e.g., "My Song.m4a"
+                    for name in os.listdir(priv_dir):
+                        if (
+                            name == f"{base}.part"
+                            or name.startswith(base)
+                            and name.endswith(".part")
+                        ):
+                            with contextlib.suppress(Exception):
+                                os.remove(os.path.join(priv_dir, name))
+            except Exception as e:
+                print("[service] audio cleanup failed:", e)
 
     def update_load_fs(self, *val):
         Gui_sounds.load_from_service = False
@@ -267,6 +337,7 @@ class Gui_sounds:
             Gui_sounds.song_local = None
             Gui_sounds.previous_songs.append(os.path.basename(Gui_sounds.file_to_load))
             _start_in_foreground_if_android()
+            acquire_wakelock()
             Gui_sounds.sound.play()
             Gui_sounds.previous = False
             if Gui_sounds.checking_it is None:
@@ -371,6 +442,7 @@ class Gui_sounds:
     def pause(self, *val):
         Gui_sounds.paused = True
         Gui_sounds.song_local = [Gui_sounds.sound.get_pos()]
+        release_wakelock()
         Gui_sounds.sound.stop()
 
     def pause_val(self, *val):

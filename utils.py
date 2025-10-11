@@ -49,10 +49,9 @@ def get_app_writable_dir(subdir: str = "") -> str:
                otherwise use the user's home directory.
     Ensures the directory exists and returns the full path.
     """
-    if sys.platform == "android":
+    if get_platform() == "android":
         try:
             from android import mActivity
-
             ctx = mActivity.getApplicationContext()
             ext = ctx.getExternalFilesDir(None)
             base = ext.getAbsolutePath() if ext else ctx.getFilesDir().getAbsolutePath()

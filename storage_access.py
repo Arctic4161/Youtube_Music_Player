@@ -1,16 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import json
-import sys
 from typing import Callable, Optional, Sequence
-
-
-def _is_android() -> bool:
-    return sys.platform == "android"
+import utils
 
 
 def _sdk_int() -> int:
-    if not _is_android():
+    if utils.get_platform() == "android":
         return 0
     try:
         from jnius import autoclass
@@ -35,7 +32,7 @@ class DownloadsAccess:
         self._load_settings()
 
     def request_runtime_permissions(
-        self, callback: Optional[Callable[[bool], None]] = None
+            self, callback: Optional[Callable[[bool], None]] = None
     ) -> None:
         """
         Request best-effort runtime permissions:
@@ -43,7 +40,7 @@ class DownloadsAccess:
           - Android 10-12 (SDK 29-32): READ_EXTERNAL_STORAGE (WRITE is ignored on 30+)
           - Android 9 and below (SDK <= 28): READ/WRITE_EXTERNAL_STORAGE
         """
-        if not _is_android():
+        if utils.get_platform() == "android":
             if callback:
                 callback(True)
             return
@@ -90,13 +87,13 @@ class DownloadsAccess:
                     callback(False)
 
     def show_permission_popup(
-        self, on_result: Optional[Callable[[bool], None]] = None
+            self, on_result: Optional[Callable[[bool], None]] = None
     ) -> None:
         """
         Opens a system picker to grant access to the public 'Downloads' folder.
         Persists the tree URI if selected.
         """
-        if not _is_android():
+        if utils.get_platform() == "android":
             if on_result:
                 on_result(True)
             return
@@ -105,25 +102,21 @@ class DownloadsAccess:
             from androidstorage4kivy import SharedStorage
 
             ss = SharedStorage()
-            uri = ss.open_document_tree(initial_uri="downloads")
-            if uri:
+            if uri := ss.open_document_tree(initial_uri="downloads"):
                 self.tree_uri = uri
-                try:
+                with contextlib.suppress(Exception):
                     ss.persist_uri_permissions(uri)
-                except Exception:
-                    pass
                 self._save_settings()
                 if on_result:
                     on_result(True)
-            else:
-                if on_result:
-                    on_result(False)
+            elif on_result:
+                on_result(False)
         except Exception:
             if on_result:
                 on_result(False)
 
     def exists(self, relative_path: str) -> bool:
-        if not _is_android() or not self.tree_uri:
+        if utils.get_platform() == "android" or not self.tree_uri:
             return False
         try:
             from androidstorage4kivy import SharedStorage
@@ -134,7 +127,7 @@ class DownloadsAccess:
             return False
 
     def read_bytes(self, relative_path: str) -> Optional[bytes]:
-        if not _is_android() or not self.tree_uri:
+        if utils.get_platform() == "android" or not self.tree_uri:
             return None
         try:
             from androidstorage4kivy import SharedStorage
@@ -145,7 +138,7 @@ class DownloadsAccess:
             return None
 
     def write_bytes(self, relative_path: str, data: bytes) -> bool:
-        if not _is_android() or not self.tree_uri:
+        if utils.get_platform() == "android" or not self.tree_uri:
             return False
         try:
             from androidstorage4kivy import SharedStorage
