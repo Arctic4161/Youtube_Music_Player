@@ -76,7 +76,7 @@ def _request_notification_permission_if_needed():
             request_permissions([Permission.POST_NOTIFICATIONS])
     except Exception as e:
         print("Notification permission request failed:", e)
-        
+
 
 def default_cover_path():
     candidates = [
@@ -92,7 +92,9 @@ def default_cover_path():
 def _safe_filename(name: str, default_prefix="track", max_len=120) -> str:
     if not name:
         name = ""
-    name = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', " ", name)   # Windows-illegal + control chars
+    name = re.sub(
+        r'[<>:"/\\|?*\x00-\x1F]+', " ", name
+    )
     name = re.sub(r"\s+", " ", name).strip(" .")
     name = name[:max_len].rstrip(" .") or f"{default_prefix}_{int(time.time())}"
     return name
@@ -1393,7 +1395,7 @@ class Musicapp(MDApp):
         fname = _safe_filename(title) + ".jpg"
         path = os.path.join(base, fname)
         return path if os.path.exists(path) else default_cover_path()
-    
+
     def ensure_android_storage_permissions(self):
         with contextlib.suppress(Exception):
             da = DownloadsAccess()

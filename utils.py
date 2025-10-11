@@ -2,6 +2,7 @@ import contextlib
 import os
 import sys
 from os import environ
+from pathlib import Path
 
 
 def get_platform():
@@ -40,31 +41,46 @@ def find_real_downloads():
     return buf.value
 
 
-def get_app_writable_dir(subdir: str = "") -> str:
+def get_app_writable_dir(subpath: str = "") -> str:
     """
-    Android -> app-specific files dir (scoped storage safe).
-      /storage/emulated/0/Android/data/<package>/files   (preferred)
-      or internal: /data/user/0/<package>/files
-    Desktop -> if subdir starts with 'Download/' or 'Downloads/', use the OS Downloads folder,
-               otherwise use the user's home directory.
-    Ensures the directory exists and returns the full path.
+    Return an app-writable directory. On Android, this is the app-specific external
+    files dir (optionally under its Downloads bucket). On desktop, it maps to
+    ~/Downloads (or ~/Documents if you prefer).
     """
+    sub = (
+        (subpath or "").strip().lstrip("/")
+    )  # prevent absolute paths like "/Download/.."
+
     if get_platform() == "android":
-        try:
-            from android import mActivity
+        return android_write_directory(sub)
+    home = Path.home()
 
-            ctx = mActivity.getApplicationContext()
-            ext = ctx.getExternalFilesDir(None)
-            base = ext.getAbsolutePath() if ext else ctx.getFilesDir().getAbsolutePath()
-        except Exception:
-            base = os.path.expanduser("~")
-    elif subdir.lower().startswith(("download/", "downloads/")):
-        base = _desktop_downloads_dir()
-        parts = subdir.split("/", 1)
-        subdir = parts[1] if len(parts) > 1 else ""
-    else:
-        base = os.path.expanduser("~")
+    downloads = (
+        home / "Downloads"
+        if (home / "Downloads").exists()
+        else home  # fallback if Downloads doesn't exist
+    )
+    dest = downloads / sub if sub else downloads
+    dest.mkdir(parents=True, exist_ok=True)
+    return str(dest)
 
-    path = os.path.join(base, subdir) if subdir else base
-    os.makedirs(path, exist_ok=True)
-    return path
+
+def android_write_directory(sub):
+    from jnius import autoclass
+
+    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+    Environment = autoclass("android.os.Environment")
+    activity = PythonActivity.mActivity
+
+    base = (
+        base_dir.getAbsolutePath()
+        if (base_dir := activity.getExternalFilesDir(None))
+        else activity.getFilesDir().getAbsolutePath()
+    )
+    if sub and sub.split("/", 1)[0].lower().startswith("download"):
+        if dl := activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS):
+            base = dl.getAbsolutePath()
+
+    dest = os.path.join(base, sub) if sub else base
+    os.makedirs(dest, exist_ok=True)
+    return dest
