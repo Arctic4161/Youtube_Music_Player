@@ -52,7 +52,11 @@ class PlaylistManagerSAF:
                     self._inner.storage_path = new_path
 
     def load(self) -> None:
-        if utils.get_platform() == "android" and self._downloads and self._downloads.tree_uri:
+        if (
+            utils.get_platform() == "android"
+            and self._downloads
+            and self._downloads.tree_uri
+        ):
             with contextlib.suppress(Exception):
                 if txt := self._downloads.read_text(self._relative_json):
                     raw = json.loads(txt)
@@ -68,7 +72,11 @@ class PlaylistManagerSAF:
         return self._inner.load()
 
     def save(self) -> None:
-        if utils.get_platform() == "android" and self._downloads and self._downloads.tree_uri:
+        if (
+            utils.get_platform() == "android"
+            and self._downloads
+            and self._downloads.tree_uri
+        ):
             with contextlib.suppress(Exception):
                 # Prefer a serializer if it exists on the inner manager
                 if hasattr(self._inner, "to_dict"):

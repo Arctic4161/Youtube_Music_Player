@@ -5,8 +5,8 @@ import os
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
-from utils import get_app_writable_dir
 
+from utils import get_app_writable_dir
 
 DEFAULT_REL_SUBDIR = "Download/Youtube Music Player/Downloaded/Played"
 PLAYLIST_FILENAME = "playlists.json"

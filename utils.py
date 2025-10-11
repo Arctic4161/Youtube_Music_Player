@@ -52,6 +52,7 @@ def get_app_writable_dir(subdir: str = "") -> str:
     if get_platform() == "android":
         try:
             from android import mActivity
+
             ctx = mActivity.getApplicationContext()
             ext = ctx.getExternalFilesDir(None)
             base = ext.getAbsolutePath() if ext else ctx.getFilesDir().getAbsolutePath()

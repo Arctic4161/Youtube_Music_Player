@@ -1,5 +1,6 @@
 import contextlib
 import os
+import re
 import sys
 
 from kivy.factory import Factory
@@ -13,31 +14,19 @@ import utils
 from playlist_manager_saf_wrapper import PlaylistManagerSAF as PlaylistManager
 from storage_access import DownloadsAccess
 from utils import get_app_writable_dir
+
 os.makedirs(
-        get_app_writable_dir("Download/Youtube Music Player/Downloaded/Played"),
-        exist_ok=True,
-    )
+    get_app_writable_dir("Download/Youtube Music Player/Downloaded/Played"),
+    exist_ok=True,
+)
 
 if utils.get_platform() == "android":
-    from android.permissions import Permission, request_permissions
     from jnius import JavaException, autoclass
-
-    request_permissions(
-        [
-            Permission.INTERNET,
-            Permission.FOREGROUND_SERVICE,
-            Permission.MEDIA_CONTENT_CONTROL,
-            Permission.WRITE_EXTERNAL_STORAGE,
-            Permission.READ_EXTERNAL_STORAGE,
-            Permission.READ_MEDIA_AUDIO,
-            Permission.READ_MEDIA_IMAGES,
-        ]
-    )
 else:
-    os.environ["KIVY_HOME"] = os.path.join(
-        os.path.expanduser("~/Documents"), "Youtube Music Player", "Downloaded"
-    )
     os.environ["KIVY_AUDIO"] = "gstplayer"
+kivy_home = get_app_writable_dir("Download/Youtube Music Player/Downloaded")
+os.makedirs(kivy_home, exist_ok=True)
+os.environ["KIVY_HOME"] = kivy_home
 os.environ["KIVY_NO_CONSOLELOG"] = "1"
 import time
 from threading import Thread
@@ -61,6 +50,22 @@ from pytube.helpers import safe_filename
 from youtubesearchpython import VideosSearch
 
 
+def _request_runtime_permissions():
+    from android.permissions import Permission, request_permissions
+
+    perms = [
+        Permission.INTERNET,
+        Permission.FOREGROUND_SERVICE,
+        Permission.MEDIA_CONTENT_CONTROL,
+        Permission.WRITE_EXTERNAL_STORAGE,
+        Permission.READ_EXTERNAL_STORAGE,
+        Permission.READ_MEDIA_AUDIO,
+        Permission.READ_MEDIA_IMAGES,
+        Permission.POST_NOTIFICATIONS,
+    ]
+    request_permissions(perms)
+
+
 def _request_notification_permission_if_needed():
     try:
         from android.permissions import Permission, request_permissions
@@ -71,6 +76,26 @@ def _request_notification_permission_if_needed():
             request_permissions([Permission.POST_NOTIFICATIONS])
     except Exception as e:
         print("Notification permission request failed:", e)
+        
+
+def default_cover_path():
+    candidates = [
+        "music.png",
+        "music.ico",
+    ]
+    for rel in candidates:
+        if p := resource_find(rel):
+            return p
+    return
+
+
+def _safe_filename(name: str, default_prefix="track", max_len=120) -> str:
+    if not name:
+        name = ""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', " ", name)   # Windows-illegal + control chars
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    name = name[:max_len].rstrip(" .") or f"{default_prefix}_{int(time.time())}"
+    return name
 
 
 class RecycleViewRow(BoxLayout):
@@ -126,6 +151,27 @@ class MySlider(MDSlider):
 class GUILayout(MDFloatLayout, MDGridLayout):
     gui_reset = False
 
+    def reset_for_new_query(self):
+        """Clear time + status and hide the slider before a new search/load kicks off."""
+        app = MDApp.get_running_app()
+        root = app.root
+
+        with contextlib.suppress(Exception):
+            root.ids.info.text = ""
+
+        with contextlib.suppress(Exception):
+            root.ids.song_position.text = ""
+            root.ids.song_max.text = ""
+
+        with contextlib.suppress(Exception):
+            self.ids.cover.source = default_cover_path()
+
+        if GUILayout.slider is not None:
+            with contextlib.suppress(Exception):
+                GUILayout.slider.value = 0
+                GUILayout.slider.disabled = True
+                GUILayout.slider.opacity = 0
+
     def on_song_not_found(self, *val):
         missing = "".join(val).strip() or "Selected track"
 
@@ -170,10 +216,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             root = app.root
         except Exception:
             return
-        with contextlib.suppress(Exception):
-            root.ids.imageView.source = os.path.join(
-                os.path.dirname(__file__), "music.png"
-            )
         with contextlib.suppress(Exception):
             root.ids.song_title.text = ""
             root.ids.info.text = ""
@@ -342,7 +384,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def on_kv_post(self, base_widget):
         with contextlib.suppress(Exception):
-            self._ensure_android_storage_permissions()
+            self.ids.cover.source = default_cover_path()
+        with contextlib.suppress(Exception):
+            MDApp.get_running_app().ensure_android_storage_permissions()
         try:
             self.library_tab = Factory.LibraryTab()
             self.ids.bottom_nav.add_widget(self.library_tab)
@@ -671,7 +715,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         added = max(0, len(apm.active_playlist().tracks) - before) if apm else 0
         skipped = max(0, len(paths) - added)
 
-
         with contextlib.suppress(Exception):
             self._playlist_refresh_tracks()
         with contextlib.suppress(Exception):
@@ -712,8 +755,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.change_screen_item("Screen 1")
 
     is_scrubbing = False
-    image_path = StringProperty(os.path.join(os.path.dirname(__file__), "music.png"))
-    set_local_download = get_app_writable_dir("Download/Youtube Music Player/Downloaded/Played")
+    image_path = default_cover_path()
+    set_local_download = get_app_writable_dir(
+        "Download/Youtube Music Player/Downloaded/Played"
+    )
     os.makedirs(set_local_download, exist_ok=True)
 
     def __draw_shadow__(self, origin, end, context=None):
@@ -842,13 +887,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def message_box(self, message):
         """Options popup (Page 2): MDDialog version, same logic (Yes deletes)."""
 
-
         box = BoxLayout(orientation="vertical", padding=10)
         body = Factory.MDLabel(
             text="Delete this track from disk?", theme_text_color="Secondary"
         )
         box.add_widget(body)
-
 
         self._current_dialog = MDDialog(
             title="Delete",
@@ -875,11 +918,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def remove_track(self, message):
         song = os.path.join(
             get_app_writable_dir("Download/Youtube Music Player/Downloaded/Played"),
-            f"{message}"
+            f"{message}",
         )
+
         image = os.path.join(
             get_app_writable_dir("Download/Youtube Music Player/Downloaded/Played"),
-            f"{message[:-4]}.jpg"
+            f"{message[:-4]}.jpg",
         )
         with contextlib.suppress(PermissionError, FileNotFoundError):
             os.remove(song)
@@ -896,6 +940,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.second_screen2()
 
     def getting_song(self, message):
+        self.reset_for_new_query()
         with contextlib.suppress(Exception):
             self._send_active_playlist_to_service()
         GUILayout.send("update_load_fs", "update_load_fs")
@@ -903,11 +948,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.stop()
         self.stream = os.path.join(
             get_app_writable_dir("Download/Youtube Music Player/Downloaded/Played"),
-            f"{message}"
+            f"{message}",
         )
         self.set_local = os.path.join(
             get_app_writable_dir("Download/Youtube Music Player/Downloaded/Played"),
-            f"{message[:-4]}.jpg"
+            f"{message[:-4]}.jpg",
         )
         with contextlib.suppress(Exception):
             MDApp.get_running_app().root.ids.imageView.source = str(self.set_local)
@@ -1005,6 +1050,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         return [os.path.basename(i) for i in time_sorted_list if i.endswith("m4a")]
 
     def new_search(self):
+        self.reset_for_new_query()  # <-- add this
         self.shuffle_selected = False
         MDApp.get_running_app().root.ids.shuffle_btt.text_color = 0, 0, 0, 1
         if GUILayout.slider is not None:
@@ -1090,10 +1136,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.previous_btt.opacity = 1
 
     def error_reset(self, msg):
-        print(msg)
-        MDApp.get_running_app().root.ids.imageView.source = os.path.join(
-            os.path.dirname(__file__), "music.png"
-        )
+        MDApp.get_running_app().root.ids.imageView.source = default_cover_path()
         if msg == "search":
             MDApp.get_running_app().root.ids.info.text = "Error Searching Music"
             MDApp.get_running_app().root.ids.play_btt.opacity = 0
@@ -1342,7 +1385,16 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
 
 class Musicapp(MDApp):
-    def _ensure_android_storage_permissions(self):
+
+    def get_thumb_path(self, title: str) -> str:
+        """Return a valid local path for a track thumbnail, or the default cover."""
+        base = get_app_writable_dir("Download/Youtube Music Player/Downloaded/Played")
+        os.makedirs(base, exist_ok=True)
+        fname = _safe_filename(title) + ".jpg"
+        path = os.path.join(base, fname)
+        return path if os.path.exists(path) else default_cover_path()
+    
+    def ensure_android_storage_permissions(self):
         with contextlib.suppress(Exception):
             da = DownloadsAccess()
 
@@ -1358,6 +1410,10 @@ class Musicapp(MDApp):
                 da = DownloadsAccess()
                 if not getattr(da, "tree_uri", None):
                     Clock.schedule_once(lambda dt: self.ask_for_downloads_access(), 0.6)
+                Clock.schedule_once(lambda dt: _request_runtime_permissions(), 0.6)
+                Clock.schedule_once(
+                    lambda dt: _request_notification_permission_if_needed(), 0.6
+                )
         except Exception as e:
             print("on_start SAF prompt error:", e)
 
@@ -1371,14 +1427,11 @@ class Musicapp(MDApp):
         def _done(ok: bool):
             try:
                 if ok:
-                    from playlist_manager_saf_wrapper import (
-                        PlaylistManagerSAF as PlaylistManager,
-                    )
-
                     self._playlist_manager = PlaylistManager()
-                    if hasattr(self, "refresh_playlist"):
+                    root = getattr(self, "root", None)
+                    if root and hasattr(root, "refresh_playlist"):
                         with contextlib.suppress(Exception):
-                            self.refresh_playlist()
+                            root.refresh_playlist()
             except Exception as e:
                 print("SAF grant handler error:", e)
 
@@ -1389,7 +1442,7 @@ class Musicapp(MDApp):
 
     def build(self):
         self.title = "Youtube Music Player"
-        icon = os.path.join(os.path.dirname(__file__), "music.png")
+        icon = default_cover_path()
         self.icon = icon
         self.theme_cls.theme_style = "Light"
         self.theme_cls.primary_palette = "Green"

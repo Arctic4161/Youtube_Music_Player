@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 from typing import Callable, Optional, Sequence
+
 import utils
 
 
@@ -32,7 +33,7 @@ class DownloadsAccess:
         self._load_settings()
 
     def request_runtime_permissions(
-            self, callback: Optional[Callable[[bool], None]] = None
+        self, callback: Optional[Callable[[bool], None]] = None
     ) -> None:
         """
         Request best-effort runtime permissions:
@@ -87,7 +88,7 @@ class DownloadsAccess:
                     callback(False)
 
     def show_permission_popup(
-            self, on_result: Optional[Callable[[bool], None]] = None
+        self, on_result: Optional[Callable[[bool], None]] = None
     ) -> None:
         """
         Opens a system picker to grant access to the public 'Downloads' folder.

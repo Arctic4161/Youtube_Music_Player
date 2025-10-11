@@ -258,7 +258,9 @@ class Gui_sounds:
                             img_data,
                         )
                         try:
-                            priv_dir = get_app_writable_dir("Download/Youtube Music Player/Downloaded/Played")
+                            priv_dir = get_app_writable_dir(
+                                "Download/Youtube Music Player/Downloaded/Played"
+                            )
                             thumb_src = os.path.join(priv_dir, f"{settitle}.jpg")
                             if os.path.exists(thumb_src):
                                 os.remove(thumb_src)

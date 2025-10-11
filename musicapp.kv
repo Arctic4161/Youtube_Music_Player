@@ -193,7 +193,7 @@
             AsyncImage:
                 size_hint: None, None
                 size: "48dp", "48dp"
-                source: app.root.set_local_download + "/" + root.text + ".jpg"
+                source: app.get_thumb_path(root.text or "")
 
             MDBoxLayout:
                 orientation: "vertical"
