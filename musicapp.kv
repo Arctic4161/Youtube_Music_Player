@@ -1,3 +1,4 @@
+#:import Factory kivy.factory.Factory
 <GUILayout>:
     MDBottomNavigation:
         id: bottom_nav
@@ -26,6 +27,13 @@
                     icon_color: app.theme_cls.primary_color
                     on_press: root.new_search()
 
+                MDIconButton:
+                    id: storage_btn
+                    icon: "folder-cog"
+                    tooltip_text: "Storage / Downloads access"
+                    pos_hint: {'center_x': 0.08, 'center_y': 0.93}
+                    on_release: app.root.open_storage_dialog()
+
                 MDTextField:
                     id: input_box
                     hint_text: "Enter Search"
@@ -49,7 +57,7 @@
                     text: ""
                     font_size: dp(12)
                     size_hint_y: 0.03
-                    pos_hint: {'center_x': 0.60, 'center_y': 0.35}
+                    pos_hint: {'center_x': 0.60, 'center_y': 0.32}
                     theme_text_color: "Custom"
                     text_color: 1, 1, 1, 1
 
@@ -132,9 +140,9 @@
 
                 AsyncImage:
                     id: imageView
-                    pos_hint: {'center_x': 0.5, 'center_y': 0.6}
-                    size_hint_y: 0.3
-                    size_hint_x: 0.3
+                    pos_hint: {'center_x': 0.5, 'center_y': 0.57}
+                    size_hint_y: 0.5
+                    size_hint_x: 0.5
                     source: root.image_path
                     mipmap: True
 
@@ -197,10 +205,10 @@
 
             MDBoxLayout:
                 orientation: "vertical"
-                size_hint_x: 1
+                size_hint_x: 2
 
                 MDLabel:
-                    text: root.text[:60] + "…" if len(root.text) > 60 else root.text
+                    text: root.text
                     bold: True
                     halign: "left"
                     shorten: True
@@ -239,9 +247,6 @@
                         font_style: "Caption"
                         theme_text_color: "Secondary"
                         adaptive_size: True
-
-            Widget:
-
             MDIconButton:
                 icon: "play"
                 tooltip_text: "Play"
@@ -253,3 +258,37 @@
                 icon: "dots-vertical"
                 tooltip_text: "Options"
                 on_release: app.root.message_box(message=root.text + ".m4a")
+
+
+
+
+<StorageAccessContent@MDBoxLayout>:
+    orientation: "vertical"
+    adaptive_height: True
+    spacing: "14dp"
+    padding: "16dp"
+
+    MDLabel:
+        text: "Grant or test Storage Access Framework (SAF) so the app can write to the shared Downloads folder."
+        adaptive_height: True
+        theme_text_color: "Secondary"
+
+    MDRaisedButton:
+        text: "Grant Downloads access"
+        on_release: app.ask_for_downloads_access()
+
+    MDRaisedButton:
+        text: "Test write to Downloads"
+        on_release: app.test_downloads_write()
+
+    MDFlatButton:
+        text: "Close"
+        on_release: app.root.close_storage_dialog()
+
+<StorageAccessDialog@MDDialog>:
+    title: "Downloads access"
+    type: "custom"
+    content_cls: Factory.StorageAccessContent()
+
+
+

@@ -38,6 +38,17 @@
         opacity: 1 if root.missing else 0
         size_hint_x: None
         width: self.texture_size[0] if root.missing else 0
+    
+    MDIconButton:
+        icon: "arrow-up"
+        tooltip_text: "Move up"
+        on_release: app.root._playlist_move_up(root.index)
+        disabled: root.index == 0
+    MDIconButton:
+        icon: "arrow-down"
+        tooltip_text: "Move down"
+        on_release: app.root._playlist_move_down(root.index)
+        disabled: app.root._is_last_index(root.index)
     MDIconButton:
         icon: "delete"
         on_release: app.root._playlist_remove_track(root.index)
@@ -47,14 +58,18 @@
     name: "Screen 3"
     text: "Library"
     MDBoxLayout:
+        size_hint: 1, 1
         orientation: "horizontal"
         padding: dp(8)
         spacing: dp(8)
 
         # LEFT: Playlists list
         MDCard:
+            size_hint_y: 1
             radius: dp(16)
+            min_width: dp(160)
             padding: dp(8)
+            style: "filled"
             size_hint_x: 0.35
             MDBoxLayout:
                 orientation: "vertical"
@@ -82,8 +97,10 @@
 
         # RIGHT: Tracks of selected playlist
         MDCard:
+            size_hint_y: 1
             radius: dp(16)
             padding: dp(8)
+            style: "filled"
             size_hint_x: 0.65
             MDBoxLayout:
                 orientation: "vertical"

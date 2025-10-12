@@ -42,45 +42,70 @@ def find_real_downloads():
 
 
 def get_app_writable_dir(subpath: str = "") -> str:
-    """
-    Return an app-writable directory. On Android, this is the app-specific external
-    files dir (optionally under its Downloads bucket). On desktop, it maps to
-    ~/Downloads (or ~/Documents if you prefer).
-    """
-    sub = (
-        (subpath or "").strip().lstrip("/")
-    )  # prevent absolute paths like "/Download/.."
+    sub = (subpath or "").strip().lstrip("/").replace("\\", "/")
 
     if get_platform() == "android":
         return android_write_directory(sub)
-    home = Path.home()
 
-    downloads = (
-        home / "Downloads"
-        if (home / "Downloads").exists()
-        else home  # fallback if Downloads doesn't exist
-    )
-    dest = downloads / sub if sub else downloads
-    dest.mkdir(parents=True, exist_ok=True)
-    return str(dest)
+    try:
+        dest = Path(_desktop_downloads_dir()) / "Youtube Music Player"
+        dest = dest / sub if sub else dest
+        dest.mkdir(parents=True, exist_ok=True)
+        return str(dest)
+    except Exception:
+        dest = (
+            os.path.expanduser(os.path.join("~", sub))
+            if sub
+            else os.path.expanduser("~")
+        )
+        os.makedirs(dest, exist_ok=True)
+        return dest
 
 
-def android_write_directory(sub):
+def android_write_directory(sub: str) -> str:
+    """
+    Resolve an app-writable directory on Android that works from both the Activity
+    and the Service. If sub starts with 'Download', use the app's Downloads sandbox.
+    Always creates the directory.
+    """
+
+    sub = (sub or "").strip().lstrip("/").replace("\\", "/")
+    return
     from jnius import autoclass
 
-    PythonActivity = autoclass("org.kivy.android.PythonActivity")
-    Environment = autoclass("android.os.Environment")
-    activity = PythonActivity.mActivity
+    ctx = None
+    try:
+        PythonService = autoclass("org.kivy.android.PythonService")
+        ctx = PythonService.mService
+    except Exception:
+        pass
+    if ctx is None:
+        try:
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            ctx = PythonActivity.mActivity
+        except Exception:
+            pass
+    if ctx is None:
+        try:
+            ActivityThread = autoclass("android.app.ActivityThread")
+            app = ActivityThread.currentApplication()
+            ctx = app if app else None
+        except Exception:
+            ctx = None
+    if ctx is None:
+        raise RuntimeError("No Android Context available (service/activity).")
 
+    Environment = autoclass("android.os.Environment")
+
+    base_dir = ctx.getExternalFilesDir(None)
     base = (
-        base_dir.getAbsolutePath()
-        if (base_dir := activity.getExternalFilesDir(None))
-        else activity.getFilesDir().getAbsolutePath()
+        base_dir.getAbsolutePath() if base_dir else ctx.getFilesDir().getAbsolutePath()
     )
     if sub and sub.split("/", 1)[0].lower().startswith("download"):
-        if dl := activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS):
+        dl = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+        if dl:
             base = dl.getAbsolutePath()
 
-    dest = os.path.join(base, sub) if sub else base
+    dest = os.path.join(base, "Youtube Music Player", sub) if sub else base
     os.makedirs(dest, exist_ok=True)
     return dest

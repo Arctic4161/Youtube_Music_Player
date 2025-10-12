@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 
 from utils import get_app_writable_dir
 
-DEFAULT_REL_SUBDIR = "Download/Youtube Music Player/Downloaded/Played"
+DEFAULT_REL_SUBDIR = "Downloaded/Played"
 PLAYLIST_FILENAME = "playlists.json"
 
 

@@ -2,21 +2,22 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 from typing import Callable, Optional, Sequence
 
 import utils
 
 
 def _sdk_int() -> int:
-    if utils.get_platform() == "android":
-        return 0
     try:
-        from jnius import autoclass
+        if utils.get_platform() == "android":
+            from jnius import autoclass
 
-        VERSION = autoclass("android.os.Build$VERSION")
-        return int(VERSION.SDK_INT)
+            VERSION = autoclass("android.os.Build$VERSION")
+            return int(VERSION.SDK_INT)
     except Exception:
-        return 0
+        pass
+    return 0
 
 
 class DownloadsAccess:
@@ -27,9 +28,13 @@ class DownloadsAccess:
       - Simple read/write helpers in the selected Downloads tree.
     """
 
-    def __init__(self, settings_path: str = "storage_settings.json"):
+    def __init__(self, settings_path: str | None = None):
+        if settings_path is None:
+            settings_path = os.path.join(
+                utils.get_app_writable_dir(""), "storage_settings.json"
+            )
         self.settings_path = settings_path
-        self.tree_uri: Optional[str] = None
+        self.tree_uri = None
         self._load_settings()
 
     def request_runtime_permissions(
@@ -41,17 +46,9 @@ class DownloadsAccess:
           - Android 10-12 (SDK 29-32): READ_EXTERNAL_STORAGE (WRITE is ignored on 30+)
           - Android 9 and below (SDK <= 28): READ/WRITE_EXTERNAL_STORAGE
         """
-        if utils.get_platform() == "android":
-            if callback:
-                callback(True)
-            return
-
-        sdk = _sdk_int()
+        sdk = _sdk_int()  # works on Android; see next tiny fix
         try:
-            from android.permissions import (
-                Permission,
-                request_permissions,
-            )
+            from android.permissions import Permission, request_permissions
         except Exception:
             if callback:
                 callback(False)
@@ -62,6 +59,7 @@ class DownloadsAccess:
                 Permission.READ_MEDIA_AUDIO,
                 Permission.READ_MEDIA_IMAGES,
                 Permission.READ_MEDIA_VIDEO,
+                Permission.POST_NOTIFICATIONS,
             ]
         elif sdk >= 30:
             perms = [Permission.READ_EXTERNAL_STORAGE]
@@ -71,53 +69,39 @@ class DownloadsAccess:
                 Permission.WRITE_EXTERNAL_STORAGE,
             ]
 
-        def _cb(perms_result):
-            ok = all(bool(x) for x in perms_result) if perms_result else False
+        def _cb(res=None):
+            ok = all(bool(x) for x in (res or [])) if res is not None else True
             if callback:
                 callback(ok)
 
         try:
             request_permissions(perms, _cb)
         except TypeError:
-            try:
-                request_permissions(perms)
-                if callback:
-                    callback(True)
-            except Exception:
-                if callback:
-                    callback(False)
+            request_permissions(perms)
+            _cb([True] * len(perms))
 
-    def show_permission_popup(
-        self, on_result: Optional[Callable[[bool], None]] = None
-    ) -> None:
-        """
-        Opens a system picker to grant access to the public 'Downloads' folder.
-        Persists the tree URI if selected.
-        """
-        if utils.get_platform() == "android":
-            if on_result:
-                on_result(True)
-            return
-
+    def show_permission_popup(self, on_result=None):
         try:
             from androidstorage4kivy import SharedStorage
 
             ss = SharedStorage()
-            if uri := ss.open_document_tree(initial_uri="downloads"):
+            uri = ss.open_document_tree(initial_uri="downloads")
+            if uri:
                 self.tree_uri = uri
                 with contextlib.suppress(Exception):
                     ss.persist_uri_permissions(uri)
                 self._save_settings()
                 if on_result:
                     on_result(True)
-            elif on_result:
-                on_result(False)
+            else:
+                if on_result:
+                    on_result(False)
         except Exception:
             if on_result:
                 on_result(False)
 
     def exists(self, relative_path: str) -> bool:
-        if utils.get_platform() == "android" or not self.tree_uri:
+        if utils.get_platform() != "android" or not self.tree_uri:
             return False
         try:
             from androidstorage4kivy import SharedStorage
@@ -127,8 +111,8 @@ class DownloadsAccess:
         except Exception:
             return False
 
-    def read_bytes(self, relative_path: str) -> Optional[bytes]:
-        if utils.get_platform() == "android" or not self.tree_uri:
+    def read_bytes(self, relative_path: str):
+        if utils.get_platform() != "android" or not self.tree_uri:
             return None
         try:
             from androidstorage4kivy import SharedStorage
@@ -139,7 +123,7 @@ class DownloadsAccess:
             return None
 
     def write_bytes(self, relative_path: str, data: bytes) -> bool:
-        if utils.get_platform() == "android" or not self.tree_uri:
+        if utils.get_platform() != "android" or not self.tree_uri:
             return False
         try:
             from androidstorage4kivy import SharedStorage

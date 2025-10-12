@@ -13,7 +13,7 @@ try:
 except Exception:
     DownloadsAccess = None
 
-DEFAULT_REL_SUBDIR = "Download/Youtube Music Player/Downloaded/Played"
+DEFAULT_REL_SUBDIR = "Downloaded/Played"
 PLAYLIST_FILENAME = "playlists.json"
 
 

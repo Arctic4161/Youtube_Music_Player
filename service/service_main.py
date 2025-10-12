@@ -1,7 +1,6 @@
 import contextlib
 import os.path
 import random
-import sys
 import time
 from threading import Thread
 
@@ -14,8 +13,7 @@ from utils import get_app_writable_dir
 
 if utils.get_platform() == "android":
     os.environ["KIVY_AUDIO"] = "android"
-    from android.storage import primary_external_storage_path
-    from jnius import autoclass
+    from jnius import autoclass, cast
 
     PythonService = autoclass("org.kivy.android.PythonService")
     autoclass("org.jnius.NativeInvocationHandler")
@@ -24,51 +22,83 @@ else:
 from kivy.core.audio import SoundLoader
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
+_WAKE = None
+_last_fg_ts = 0
 
 CLIENT = OSCClient("localhost", 3002, encoding="utf-8")
 
 
-# Foreground service helper for Android
-def _start_in_foreground_if_android():
-    try:
-        if utils.get_platform() == "android":
-            from jnius import autoclass, cast
+def start_foreground_heartbeat():
+    if utils.get_platform() != "android":
+        return
 
-            PythonService = autoclass("org.kivy.android.PythonService").mService
+    def _beat():
+        while True:
+            ensure_foreground()
+            time.sleep(45)
+
+    Thread(target=_beat, daemon=True).start()
+
+
+def ensure_foreground():
+    """Promote PythonService to a true Android foreground service (no AndroidX)."""
+    global _last_fg_ts
+    if utils.get_platform() != "android":
+        return
+    if time.time() - _last_fg_ts < 5:
+        return
+    _last_fg_ts = time.time()
+
+    def _start_foreground():
+        try:
             Context = autoclass("android.content.Context")
             NotificationManager = autoclass("android.app.NotificationManager")
-            Build = autoclass("android.os.Build")
-            String = autoclass("java.lang.String")
-            NotificationCompat = autoclass("androidx.core.app.NotificationCompat")
             NotificationChannel = autoclass("android.app.NotificationChannel")
+            NotificationBuilder = autoclass("android.app.Notification$Builder")
+            VERSION = autoclass("android.os.Build$VERSION")
+            PythonServiceClass = autoclass("org.kivy.android.PythonService")
 
-            nm = cast(
-                NotificationManager,
-                PythonService.getSystemService(Context.NOTIFICATION_SERVICE),
-            )
-            channel_id = String("music_playback")
+            svc = None
+            for _ in range(20):
+                try:
+                    svc = PythonServiceClass.mService
+                    if svc:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.25)
+            if not svc:
+                print("[service] ensure_foreground: mService not ready; aborting")
+                return
 
-            if Build.VERSION.SDK_INT >= 26:
-                channel = NotificationChannel(
-                    channel_id, String("Playback"), NotificationManager.IMPORTANCE_LOW
-                )
-                nm.createNotificationChannel(channel)
+            nm = cast(NotificationManager, svc.getSystemService(Context.NOTIFICATION_SERVICE))
+            channel_id = "music_playback"
 
-            builder = (
-                NotificationCompat.Builder(PythonService, channel_id)
-                .setContentTitle("Playing music")
-                .setContentText("Your music continues in the background")
-                .setSmallIcon(PythonService.getApplicationInfo().icon)
-                .setOngoing(True)
-            )
+            if VERSION.SDK_INT >= 26:
+                try:
+                    channel = NotificationChannel(channel_id, "Playback", NotificationManager.IMPORTANCE_LOW)
+                    nm.createNotificationChannel(channel)
+                except Exception:
+                    pass
+                builder = NotificationBuilder(svc, channel_id)
+            else:
+                builder = NotificationBuilder(svc)
+
+            builder.setContentTitle("Playing music")
+            builder.setContentText("Your music continues in the background")
+            builder.setSmallIcon(svc.getApplicationInfo().icon)
+            builder.setOngoing(True)
 
             notification = builder.build()
-            PythonService.startForeground(1, notification)
-    except Exception as e:
-        print(f"[service] start_in_foreground failed: {e}")
+            svc.startForeground(1, notification)
+            print("[service] ensure_foreground: promoted to foreground")
+        except Exception as e:
+            print("[service] ensure_foreground failed:", e)
+
+    Thread(target=_start_foreground, daemon=True).start()
 
 
-_WAKE = None
+
 
 
 def acquire_wakelock():
@@ -103,28 +133,10 @@ def release_wakelock():
         print("[service] wakelock release failed:", e)
     _WAKE = None
 
-
-def _enable_auto_restart_if_android():
-    """
-    Ask the Android service wrapper to auto-restart this service if it gets killed.
-    (Support may vary across p4a versions; wrapped in try/except.)
-    """
-    try:
-        service = autoclass("org.kivy.android.PythonService").mService
-        try:
-            service.setAutoRestartService(True)
-            print("[service] Auto-restart enabled")
-        except Exception as e:
-            # Older wrappers may expose it on the class instead of the instance
-            try:
-                autoclass("org.kivy.android.PythonService").setAutoRestartService(True)
-                print("[service] Auto-restart enabled (class method)")
-            except Exception:
-                print("[service] Auto-restart unavailable:", e)
-    except Exception as e:
-        # Non-Android or no service context yet
-        print("[service] Auto-restart setup skipped:", e)
-
+with contextlib.suppress(Exception):
+    ensure_foreground()
+with contextlib.suppress(Exception):
+    start_foreground_heartbeat()
 
 class CustomLogger:
     def debug(self, msg):
@@ -148,23 +160,9 @@ class Gui_sounds:
     previous_songs = []
     set_local = None
     load_from_service = False
-    if utils.get_platform() != "android":
-        set_local_download = os.path.join(
-            os.path.expanduser("~/Documents"),
-            "Youtube Music Player",
-            "Downloaded",
-            "Played",
-        )
-    else:
-        set_local_download = os.path.normpath(
-            os.path.join(
-                primary_external_storage_path(),
-                "Download",
-                "Youtube Music Player",
-                "Downloaded",
-                "Played",
-            )
-        )
+    set_local_download = get_app_writable_dir(
+        "Downloaded/Played"
+    )
     cache_dire = os.path.join(os.getcwd(), "Downloaded")
     os.makedirs(cache_dire, exist_ok=True)
     shuffle_selected = False
@@ -179,8 +177,8 @@ class Gui_sounds:
     previous = False
     looping_bool = False
     shuffle_bool = "False"
-    shuffle_bag = []  # remaining songs in the current true-shuffle cycle
-    _bag_source_len = 0  # tracks length of playlist used to build the bag
+    shuffle_bag = []
+    _bag_source_len = 0
 
     @staticmethod
     def load(*val):
@@ -216,7 +214,7 @@ class Gui_sounds:
                 "default": (
                     os.path.join(
                         get_app_writable_dir(
-                            "Download/Youtube Music Player/Downloaded/Played"
+                            "Downloaded/Played"
                         ),
                         f"{settitle}.%(ext)s",
                     )
@@ -224,7 +222,7 @@ class Gui_sounds:
                     else os.path.join(set_local_download, f"{settitle}.%(ext)s")
                 )
             },
-            "proxies": {"socks5": "154.38.180.176:443"},
+            "proxies": {"all": "socks5://154.38.180.176:443"},
             "overwrites": True,
             "format": "m4a/bestaudio",
             "ignoreerrors": True,
@@ -232,14 +230,13 @@ class Gui_sounds:
             "retries": 20,
             "restrictfilenames": True,
             "writelog": os.path.join(Gui_sounds.cache_dire, "yt_download.log"),
-            "--force-ipv4": True,
-            "--no-check-certificates": True,
-            "--extractor-args": "youtube:player_client=web",
+            "forceipv4": True,
+            "nocheckcertificate": True,
             "logger": CustomLogger(),
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download(setytlink)
+                ydl.download([setytlink])
         except Exception as e:
             Gui_sounds.send("error_reset", f"download failed: {e}")
             return
@@ -254,12 +251,12 @@ class Gui_sounds:
                     da = DownloadsAccess()
                     if da and da.tree_uri:
                         da.write_bytes(
-                            f"Youtube Music Player/Downloaded/Played/{settitle}.jpg",
+                            f"Downloaded/Played/{settitle}.jpg",
                             img_data,
                         )
                         try:
                             priv_dir = get_app_writable_dir(
-                                "Download/Youtube Music Player/Downloaded/Played"
+                                "Downloaded/Played"
                             )
                             thumb_src = os.path.join(priv_dir, f"{settitle}.jpg")
                             if os.path.exists(thumb_src):
@@ -268,7 +265,7 @@ class Gui_sounds:
                             print("[service] thumb cleanup failed:", e)
                     else:
                         priv_dir = get_app_writable_dir(
-                            "Download/Youtube Music Player/Downloaded/Played"
+                            "Downloaded/Played"
                         )
                         with open(
                             os.path.join(priv_dir, f"{settitle}.jpg"), "wb"
@@ -293,7 +290,7 @@ class Gui_sounds:
 
     def set_download_directory(self, settitle, da):
         priv_dir = get_app_writable_dir(
-            "Download/Youtube Music Player/Downloaded/Played"
+            "Downloaded/Played"
         )
         m4a_path = os.path.join(priv_dir, f"{settitle}.m4a")
         alt_path = None
@@ -307,21 +304,16 @@ class Gui_sounds:
             with open(file_src_path, "rb") as fsrc:
                 data = fsrc.read()
             da.write_bytes(
-                f"Youtube Music Player/Downloaded/Played/{os.path.basename(file_src_path)}",
+                f"Downloaded/Played/{os.path.basename(file_src_path)}",
                 data,
             )
             try:
-                src_path = getattr(self, "file_src_path", None)
-                if src_path and os.path.exists(src_path):
-                    os.remove(src_path)
-                    priv_dir = os.path.dirname(src_path)
-                    base = os.path.basename(src_path)  # e.g., "My Song.m4a"
+                if file_src_path and os.path.exists(file_src_path):
+                    os.remove(file_src_path)
+                    priv_dir = os.path.dirname(file_src_path)
+                    base = os.path.basename(file_src_path)
                     for name in os.listdir(priv_dir):
-                        if (
-                            name == f"{base}.part"
-                            or name.startswith(base)
-                            and name.endswith(".part")
-                        ):
+                        if name == f"{base}.part" or (name.startswith(base) and name.endswith(".part")):
                             with contextlib.suppress(Exception):
                                 os.remove(os.path.join(priv_dir, name))
             except Exception as e:
@@ -338,7 +330,7 @@ class Gui_sounds:
             Gui_sounds.paused = False
             Gui_sounds.song_local = None
             Gui_sounds.previous_songs.append(os.path.basename(Gui_sounds.file_to_load))
-            _start_in_foreground_if_android()
+            ensure_foreground()
             acquire_wakelock()
             Gui_sounds.sound.play()
             Gui_sounds.previous = False
@@ -377,11 +369,15 @@ class Gui_sounds:
     def check_for_pause():
         if Gui_sounds.paused:
             try:
+                ensure_foreground()
+                acquire_wakelock()
                 Gui_sounds.sound.play()
                 Gui_sounds.sound.seek(Gui_sounds.song_local[0])
             except TypeError:
                 Gui_sounds.send("normalize", "normalize please")
         else:
+            ensure_foreground()
+            acquire_wakelock()
             Gui_sounds.sound.play()
         Gui_sounds.previous = False
         Gui_sounds.paused = False
@@ -413,10 +409,14 @@ class Gui_sounds:
             just_started = False
             try:
                 if Gui_sounds.sound.state != "play":
+                    ensure_foreground()
+                    acquire_wakelock()
                     Gui_sounds.sound.play()
                     just_started = True
             except Exception:
                 with contextlib.suppress(Exception):
+                    ensure_foreground()
+                    acquire_wakelock()
                     Gui_sounds.sound.play()
                     just_started = True
 
