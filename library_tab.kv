@@ -17,6 +17,9 @@
     MDIconButton:
         icon: "dots-vertical"
         on_release: app.root._playlist_open_menu(root.pid, root.name)
+        shorten: True
+        shorten_from: "right"
+        text_size: (self.width - dp(12), None)
 
 <TrackItem@BoxLayout>:
     text: ""
@@ -26,32 +29,48 @@
     height: dp(56)
     padding: dp(4), 0
     spacing: dp(6)
+
+    # LEFT: Title (single-line with ellipsis, never hidden)
     Button:
-        text: root.text[:48] + "..." if len(root.text) >= 48 else root.text
+        text: root.text
         halign: "left"
         size_hint_x: 1
         disabled: root.missing
         on_release: app.root._playlist_play_index(root.index)
-    MDLabel:
-        text: "Missing"
-        theme_text_color: "Error"
-        opacity: 1 if root.missing else 0
+        shorten: True
+        shorten_from: "right"
+        text_size: (self.width - dp(12), None)
+
+    # RIGHT: reserved area for badge + controls
+    BoxLayout:
+        orientation: "horizontal"
         size_hint_x: None
-        width: self.texture_size[0] if root.missing else 0
-    
-    MDIconButton:
-        icon: "arrow-up"
-        tooltip_text: "Move up"
-        on_release: app.root._playlist_move_up(root.index)
-        disabled: root.index == 0
-    MDIconButton:
-        icon: "arrow-down"
-        tooltip_text: "Move down"
-        on_release: app.root._playlist_move_down(root.index)
-        disabled: app.root._is_last_index(root.index)
-    MDIconButton:
-        icon: "delete"
-        on_release: app.root._playlist_remove_track(root.index)
+        width: dp(148)
+        spacing: dp(6)
+
+        MDLabel:
+            text: "Missing"
+            theme_text_color: "Error"
+            opacity: 1 if root.missing else 0
+            size_hint_x: None
+            width: self.texture_size[0] if root.missing else 0
+            valign: "middle"
+
+        MDIconButton:
+            icon: "arrow-up"
+            tooltip_text: "Move up"
+            on_release: app.root._playlist_move_up(root.index)
+            disabled: root.index == 0
+
+        MDIconButton:
+            icon: "arrow-down"
+            tooltip_text: "Move down"
+            on_release: app.root._playlist_move_down(root.index)
+            disabled: app.root._is_last_index(root.index)
+
+        MDIconButton:
+            icon: "delete"
+            on_release: app.root._playlist_remove_track(root.index)
 
 <LibraryTab@MDBottomNavigationItem>:
     # These ids are accessed from Python via self.library_tab.ids[...]

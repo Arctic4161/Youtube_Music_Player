@@ -48,6 +48,28 @@ class PlaylistManager:
         }
         self.load()
 
+    def to_dict(self) -> dict:
+        return {
+            "playlists": [
+                {"id": p.id, "name": p.name, "tracks": [asdict(t) for t in p.tracks]}
+                for p in self.data["playlists"]
+            ],
+            "active_playlist_id": self.data["active_playlist_id"],
+        }
+
+    def load_from_dict(self, raw: dict) -> None:
+        playlists = []
+        for p in raw.get("playlists", []):
+            tracks = [Track(**t) for t in p.get("tracks", [])]
+            playlists.append(
+                Playlist(
+                    id=p.get("id", str(uuid.uuid4())),
+                    name=p.get("name", "Untitled"),
+                    tracks=tracks,
+                )
+            )
+        self.create_and_save_playlist(playlists, raw)
+
     def load(self) -> None:
         if os.path.exists(self.storage_path):
             try:
@@ -79,12 +101,13 @@ class PlaylistManager:
             )
             playlists.append(pl)
 
+        self.create_and_save_playlist(playlists, raw)
+
+    def create_and_save_playlist(self, playlists, raw):
         self.data["playlists"] = playlists
         self.data["active_playlist_id"] = raw.get("active_playlist_id")
-
         if not playlists:
             self.create_playlist("Favorites")
-
         if not self.data["active_playlist_id"] and self.data["playlists"]:
             self.data["active_playlist_id"] = self.data["playlists"][0].id
             self.save()

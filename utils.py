@@ -1,6 +1,8 @@
 import contextlib
 import os
+import re
 import sys
+import time
 from os import environ
 from pathlib import Path
 
@@ -41,6 +43,15 @@ def find_real_downloads():
     return buf.value
 
 
+def safe_filename(name: str, default_prefix="track", max_len=120) -> str:
+    if not name:
+        name = ""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', " ", name)
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    name = name[:max_len].rstrip(" .") or f"{default_prefix}_{int(time.time())}"
+    return name
+
+
 def get_app_writable_dir(subpath: str = "") -> str:
     sub = (subpath or "").strip().lstrip("/").replace("\\", "/")
 
@@ -48,7 +59,7 @@ def get_app_writable_dir(subpath: str = "") -> str:
         return android_write_directory(sub)
 
     try:
-        dest = Path(_desktop_downloads_dir()) / "Youtube Music Player"
+        dest = Path(_desktop_downloads_dir()) / "YouTube Music Player"
         dest = dest / sub if sub else dest
         dest.mkdir(parents=True, exist_ok=True)
         return str(dest)
@@ -70,7 +81,6 @@ def android_write_directory(sub: str) -> str:
     """
 
     sub = (sub or "").strip().lstrip("/").replace("\\", "/")
-    return
     from jnius import autoclass
 
     ctx = None
@@ -106,6 +116,6 @@ def android_write_directory(sub: str) -> str:
         if dl:
             base = dl.getAbsolutePath()
 
-    dest = os.path.join(base, "Youtube Music Player", sub) if sub else base
+    dest = os.path.join(base, "YouTube Music Player", sub) if sub else base
     os.makedirs(dest, exist_ok=True)
     return dest

@@ -1,51 +1,38 @@
 import contextlib
 import os
-import re
 import sys
 import time
+from runpy import run_path
 
 import utils
+from media_recovery import start_mediastore_recovery_background
 from utils import get_app_writable_dir
 
-os.makedirs(
-    get_app_writable_dir("Downloaded/Played"),
-    exist_ok=True,
-)
-
-if utils.get_platform() == "android":
-    from jnius import JavaException, autoclass
-    from android.permissions import Permission, request_permissions
-
-    perms = [
-        Permission.INTERNET,
-        Permission.FOREGROUND_SERVICE,
-        Permission.MEDIA_CONTENT_CONTROL,
-        Permission.WRITE_EXTERNAL_STORAGE,
-        Permission.READ_EXTERNAL_STORAGE,
-        Permission.READ_MEDIA_AUDIO,
-        Permission.READ_MEDIA_IMAGES,
-        Permission.POST_NOTIFICATIONS,
-    ]
-    request_permissions(perms)
-else:
+if utils.get_platform() != "android":
     os.environ["KIVY_AUDIO"] = "gstplayer"
-kivy_home = get_app_writable_dir("/Downloaded")
+else:
+    from jnius import autoclass
+from kivy.storage.jsonstore import JsonStore
+
+from public_persistence import try_restore_playlists, wire_public_export
+
+kivy_home = get_app_writable_dir("Downloaded")
 os.makedirs(kivy_home, exist_ok=True)
 os.environ["KIVY_HOME"] = kivy_home
-#os.environ["KIVY_NO_CONSOLELOG"] = "1"
+# os.environ["KIVY_NO_CONSOLELOG"] = "1"
 
 from threading import Thread
 
-from kivy import platform
 from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
 from kivy.factory import Factory
 from kivy.lang import Builder
-from kivy.metrics import dp
+from kivy.metrics import dp, sp
 from kivy.properties import ObjectProperty, StringProperty
 from kivy.resources import resource_add_path, resource_find
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.scrollview import ScrollView
+from kivy.utils import platform
 from kivymd.app import MDApp
 from kivymd.toast import toast
 from kivymd.uix.boxlayout import MDBoxLayout
@@ -57,23 +44,9 @@ from kivymd.uix.slider import MDSlider
 from kivymd.uix.textfield import MDTextField
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
-from pytube.helpers import safe_filename
 from youtubesearchpython import VideosSearch
 
-from playlist_manager_saf_wrapper import PlaylistManagerSAF as PlaylistManager
-from storage_access import DownloadsAccess
-
-
-def _request_notification_permission_if_needed():
-    try:
-        from android.permissions import Permission, request_permissions
-        from jnius import autoclass
-
-        VERSION = autoclass("android.os.Build$VERSION")
-        if VERSION.SDK_INT >= 33:
-            request_permissions([Permission.POST_NOTIFICATIONS])
-    except Exception as e:
-        print("Notification permission request failed:", e)
+from playlist_manager import PlaylistManager
 
 
 def default_cover_path():
@@ -85,15 +58,6 @@ def default_cover_path():
         if p := resource_find(rel):
             return p
     return
-
-
-def _safe_filename(name: str, default_prefix="track", max_len=120) -> str:
-    if not name:
-        name = ""
-    name = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', " ", name)
-    name = re.sub(r"\s+", " ", name).strip(" .")
-    name = name[:max_len].rstrip(" .") or f"{default_prefix}_{int(time.time())}"
-    return name
 
 
 class RecycleViewRow(BoxLayout):
@@ -147,11 +111,22 @@ class MySlider(MDSlider):
 
 
 class GUILayout(MDFloatLayout, MDGridLayout):
+    store = ObjectProperty(None)
     gui_reset = False
     is_scrubbing = False
     image_path = default_cover_path()
-    set_local_download = get_app_writable_dir("/Downloaded/Played")
+    set_local_download = get_app_writable_dir("Downloaded/Played")
     os.makedirs(set_local_download, exist_ok=True)
+
+    def _start_music_service_user_initiated(self):
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        ContextCompat = autoclass("androidx.core.content.ContextCompat")
+        Intent = autoclass("android.content.Intent")
+        mActivity = PythonActivity.mActivity
+        pkg = mActivity.getPackageName()
+        SvcClass = autoclass(f"{pkg}.ServiceMusicservice")
+        intent = Intent(mActivity, SvcClass)
+        ContextCompat.startForegroundService(mActivity, intent)
 
     def reset_for_new_query(self):
         """Clear time + status and hide the slider before a new search/load kicks off."""
@@ -356,7 +331,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             apm = getattr(self, "_playlist_manager", None)
             ap = apm.active_playlist() if apm else None
             if ap and ap.tracks:
-                names = [f"{t.title}.m4a" for t in ap.tracks]
+                names = [os.path.basename(t.path) for t in ap.tracks if t.path]
                 pname = ap.name or "Playlist"
         if not names:
             try:
@@ -391,8 +366,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def on_kv_post(self, base_widget):
         with contextlib.suppress(Exception):
             self.ids.cover.source = default_cover_path()
-        with contextlib.suppress(Exception):
-            MDApp.get_running_app().ensure_android_storage_permissions()
         try:
             self.library_tab = Factory.LibraryTab()
             self.ids.bottom_nav.add_widget(self.library_tab)
@@ -403,9 +376,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         try:
             storage = (
                 os.path.join(
-                    get_app_writable_dir(
-                        "/Downloaded/Played"
-                    ),
+                    get_app_writable_dir("Downloaded/Played"),
                     "playlists.json",
                 )
                 if utils.get_platform() == "android"
@@ -416,6 +387,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         except Exception:
             storage = os.path.join(os.getcwd(), "playlists.json")
         self._playlist_manager = PlaylistManager(storage_path=storage)
+        wire_public_export(
+            self._playlist_manager, self.store, subdir="Documents/YouTube Music Player"
+        )
         self.refresh_playlist()
 
     def _playlist_refresh_sidebar(self):
@@ -715,7 +689,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def _playlist_move_up(self, index: int):
         """Move the track at `index` up by one within the active playlist."""
-        try:
+        with contextlib.suppress(Exception):
             apm = getattr(self, "_playlist_manager", None)
             ap = apm.active_playlist() if apm else None
             if not ap or not (0 <= index < len(ap.tracks)):
@@ -724,12 +698,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             if to_idx == index:
                 return
             apm.move_track(ap.id, index, to_idx)
-            # Refresh UI and notify service
             with contextlib.suppress(Exception):
                 self._playlist_refresh_tracks()
                 self._send_active_playlist_to_service()
-        except Exception:
-            pass
 
     def _playlist_move_down(self, index: int):
         """Move the track at `index` down by one within the active playlist."""
@@ -750,7 +721,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         active = self._playlist_manager.active_playlist()
         if not active or not (0 <= index < len(active.tracks)):
             return
-        names = [f"{t.title}.m4a" for t in active.tracks]
+        names = [os.path.basename(t.path) for t in active.tracks]
         if len(names) >= 2:
             self.set_playlist(True, False, 1)
             GUILayout.send("playlist", names)
@@ -775,7 +746,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def __init__(self, **kwargs):
         super(GUILayout, self).__init__(**kwargs)
-        self._storage_dialog = None
         self.fire_off_stop = False
         self.settitle = None
         self.fileosc_loaded = None
@@ -796,52 +766,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.playlist = False
         self.repeat_selected = False
         self.shuffle_selected = False
-        if utils.get_platform() == "android":
-            from android import mActivity
-
-            try:
-                PackageManager = autoclass("android.content.pm.PackageManager")
-                pm = mActivity.getPackageManager()
-                pkg = mActivity.getPackageName()
-                info = pm.getPackageInfo(pkg, PackageManager.GET_SERVICES)
-                print("[service] Package:", pkg)
-                if info.services:
-                    print("[service] Manifest declares:")
-                    for s in info.services:
-                        print("  -", s.name)
-                else:
-                    print("[service] No services declared in manifest.")
-            except Exception as e:
-                print("[service] Could not list services:", e)
-            pkg = mActivity.getPackageName()
-            svc_name = "Musicservice"
-            cls = f"{pkg}.Service{svc_name.capitalize()}"
-            try:
-                print("Starting service class:", cls)
-                Service = autoclass(cls)
-                Service.start(mActivity, "")
-                print("Started service:", cls)
-            except JavaException as e:
-                print("Failed to start service (JavaException):", cls, e)
-            except Exception as e:
-                print("Failed to start service (generic):", cls, e)
-        elif platform in ("linux", "linux2", "macos", "win"):
-            from runpy import run_path
-            from threading import Thread
-
+        if platform in ("linux", "macosx", "win"):
             GUILayout.service = Thread(
                 target=run_path,
-                args=[
-                    os.path.join(
-                        os.path.dirname(__file__), "service", "service_main.py"
-                    )
-                ],
+                args=[os.path.join(os.path.dirname(__file__), "service_main.py")],
                 kwargs={"run_name": "__main__"},
                 daemon=True,
             )
             GUILayout.service.start()
-        else:
-            raise NotImplementedError("service start not implemented on this platform")
         self.server = server = OSCThreadServer(encoding="utf8")
         server.listen(
             address=b"localhost",
@@ -849,9 +781,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             default=True,
         )
         if not hasattr(self, "check_are_we_playing") or not callable(
-            getattr(self, "check_are_we_playing", None)
+                getattr(self, "check_are_we_playing", None)
         ):
-
             def _fallback_are_we(*val):
                 with contextlib.suppress(Exception):
                     GUILayout.check_are_play = "".join(val)
@@ -877,15 +808,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.get_update_slider = Clock.schedule_interval(
             self.wait_update_slider, 1
         )
-        
-    def open_storage_dialog(self):
-        self._storage_dialog = Factory.StorageAccessDialog()
-        self._storage_dialog.open()
-
-    def close_storage_dialog(self):
-        if d := getattr(self, "_storage_dialog", None):
-            d.dismiss()
-            self._storage_dialog = None
 
     def second_screen(self):
         songs = self.get_play_list()
@@ -935,28 +857,72 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self._current_dialog.open()
 
     def remove_track(self, message):
-        song = os.path.join(
-            get_app_writable_dir("Downloaded/Played"),
-            f"{message}",
-        )
+        """
+        Deletes the selected track's media/cover from disk AND removes it
+        from the active playlist JSON so UI and data stay in sync.
+        """
+        try:
+            track_path = getattr(self, "selected_track_path", None)
+            cover_path = getattr(self, "selected_cover_path", None)
+            if not track_path and isinstance(message, dict):
+                track_path = message.get("path")
+                cover_path = message.get("cover_path")
 
-        image = os.path.join(
-            get_app_writable_dir("Downloaded/Played"),
-            f"{message[:-4]}.jpg",
-        )
-        with contextlib.suppress(PermissionError, FileNotFoundError):
-            os.remove(song)
-            os.remove(image)
+            if not track_path:
+                toast("No track selected.")
+                return
 
-        with contextlib.suppress(Exception):
-            if getattr(self, "_current_dialog", None):
-                self._current_dialog.dismiss()
-                self._current_dialog = None
-        with contextlib.suppress(Exception):
-            if getattr(self, "popup", None):
-                self.popup.dismiss()
-                self.popup = None
-        self.second_screen2()
+            import os
+            for p in (track_path, cover_path):
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except Exception as e:
+                        print(f"Warning: could not delete {p}: {e}")
+            pm = getattr(self, "playlists", None)
+            pid = getattr(self, "active_playlist_id", None)
+
+            if pm and pid is not None:
+                import os
+                norm_target = os.path.normpath(os.path.realpath(track_path))
+
+                try:
+                    tracks = pm.get_tracks(pid)
+                except Exception:
+                    tracks = []
+
+                remove_index = None
+                for idx, item in enumerate(tracks):
+                    if isinstance(item, dict):
+                        p = item.get("path") or item.get("file") or item.get("src")
+                    else:
+                        p = str(item)
+                    if not p:
+                        continue
+                    if os.path.normpath(os.path.realpath(p)) == norm_target:
+                        remove_index = idx
+                        break
+
+                if remove_index is not None:
+                    try:
+                        pm.remove_track(pid, remove_index)
+                        pm.save()  # persist
+                    except Exception as e:
+                        print(f"Warning: playlist removal failed: {e}")
+                else:
+                    print("Note: track not found in playlist; data may already be in sync.")
+
+            with contextlib.suppress(Exception):
+                self._reload_playlist_view()
+            with contextlib.suppress(Exception):
+                self._apply_idle_ui_state()
+            if dlg := getattr(self, "dialog", None):
+                with contextlib.suppress(Exception):
+                    dlg.dismiss()
+            toast("Track deleted and removed from playlist.")
+        except Exception as e:
+            print("Error in remove_track:", e)
+            toast("Delete failed.")
 
     def getting_song(self, message):
         self.reset_for_new_query()
@@ -966,11 +932,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if GUILayout.playing_song:
             self.stop()
         self.stream = os.path.join(
-            get_app_writable_dir("/Downloaded/Played"),
+            get_app_writable_dir("Downloaded/Played"),
             f"{message}",
         )
         self.set_local = os.path.join(
-            get_app_writable_dir("/Downloaded/Played"),
+            get_app_writable_dir("Downloaded/Played"),
             f"{message[:-4]}.jpg",
         )
         with contextlib.suppress(Exception):
@@ -995,7 +961,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         elif raw.startswith('["') and raw.endswith('"]'):
             raw = raw[2:-2]
         if (raw.startswith("'") and raw.endswith("'")) or (
-            raw.startswith('"') and raw.endswith('"')
+                raw.startswith('"') and raw.endswith('"')
         ):
             raw = raw[1:-1]
         filename = os.path.basename(raw)
@@ -1003,8 +969,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if not ext:
             ext = ".m4a"
             filename = base + ext
-        self.stream = f"{self.set_local_download}//{filename}"
-        self.set_local = f"{self.set_local_download}//{base}.jpg"
+        self.stream = os.path.join(self.set_local_download, filename)
+        self.set_local = os.path.join(self.set_local_download, f"{base}.jpg")
         if not os.path.exists(self.set_local):
             try:
                 jpgs = [
@@ -1016,11 +982,15 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                     img_base, _ = os.path.splitext(jpg)
                     if img_base in base or base in img_base:
                         old_audio = self.stream
-                        new_audio = f"{self.set_local_download}//{img_base}.m4a"
+                        new_audio = os.path.join(
+                            self.set_local_download, f"{img_base}.m4a"
+                        )
                         if os.path.exists(old_audio) and not os.path.exists(new_audio):
                             os.rename(old_audio, new_audio)
                         self.stream = new_audio
-                        self.set_local = f"{self.set_local_download}//{img_base}.jpg"
+                        self.set_local = os.path.join(
+                            self.set_local_download, f"{img_base}.jpg"
+                        )
                         base = img_base
                         break
             except Exception as e:
@@ -1147,7 +1117,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         else:
             settitle1 = self.settitle
         MDApp.get_running_app().root.ids.song_title.text = settitle1
-        self.settitle = safe_filename(self.settitle)
+        self.settitle = utils.safe_filename(self.settitle)
         MDApp.get_running_app().root.ids.play_btt.opacity = 1
         MDApp.get_running_app().root.ids.play_btt.disabled = False
         MDApp.get_running_app().root.ids.pause_btt.disabled = True
@@ -1181,6 +1151,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.file_loaded = False
 
     def download_yt(self):
+        if utils.get_platform() == "android":
+            self._start_music_service_user_initiated()
         MDApp.get_running_app().root.ids.next_btt.disabled = True
         MDApp.get_running_app().root.ids.previous_btt.disabled = True
         MDApp.get_running_app().root.ids.info.text = "Downloading audio... Please wait"
@@ -1264,6 +1236,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.previous_btt.disabled = False
 
     def playing(self):
+        if utils.get_platform() == "android":
+            self._start_music_service_user_initiated()
         GUILayout.get_update_slider = Clock.schedule_interval(
             self.wait_update_slider, 1
         )
@@ -1409,100 +1383,103 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
 class Musicapp(MDApp):
 
-    def get_thumb_path(self, title: str) -> str:
-        """Return a valid local path for a track thumbnail, or the default cover."""
-        base = get_app_writable_dir("/Downloaded/Played")
-        os.makedirs(base, exist_ok=True)
-        fname = f"{_safe_filename(title)}.jpg"
-        path = os.path.join(base, fname)
-        return path if os.path.exists(path) else default_cover_path()
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        store_path = os.path.join(get_app_writable_dir("Downloaded"), "app_state.json")
+        self._store = JsonStore(store_path)
+        self._update_ui_scale()
+        Window.bind(size=lambda *a: self._update_ui_scale())
 
-    def ensure_android_storage_permissions(self):
-        try:
-            if utils.get_platform() != "android":
-                return
-        except Exception:
-            return
-        da = DownloadsAccess()
+    def _update_ui_scale(self):
+        w, h = Window.size
+        base = 411.0
+        raw = (min(w, h) / base) if base else 1.0
+        self.ui_scale = max(0.85, min(1.35, raw))
 
-        def _after_perms(_ok):
-            if not getattr(da, "tree_uri", None):
-                with contextlib.suppress(Exception):
-                    da.show_permission_popup(
-                        lambda ok: (
-                            toast("Downloads access granted")
-                            if ok
-                            else toast("Downloads access denied")
-                        )
-                    )
-
-        try:
-            da.request_runtime_permissions(_after_perms)
-        except Exception:
-            _after_perms(False)
+    def spx(self, value: float) -> float:
+        """Scaled sp() you can call from KV: app.spx(14) etc."""
+        return sp(value) * float(self.ui_scale)
 
     def on_start(self):
         if utils.get_platform() != "android":
             return
 
-        da = DownloadsAccess()
+        def _progress(done, total, name):
 
-        def _after_notifications():
-            if not getattr(da, "tree_uri", None):
-                Clock.schedule_once(lambda dt: self.ask_for_downloads_access(), 0.2)
+            with contextlib.suppress(Exception):
+                pct = int((done / total) * 100)
+                print(f"[recovery] {done}/{total} • {pct}% • {name}")
+                toast(f"Restoring {done}/{total}")
 
-        def _after_runtime_perms(ok: bool):
-            Clock.schedule_once(lambda dt: _request_notification_permission_if_needed(), 0.1)
-            Clock.schedule_once(lambda dt: _after_notifications(), 0.3)
+        def _done(summary):
+            print("[recovery] done:", summary)
+            with contextlib.suppress(Exception):
+                self._playlist_manager = PlaylistManager()
+                try_restore_playlists(
+                    self._store,
+                    self._playlist_manager,
+                    subdir="Documents/YouTube Music Player",
+                )
+                self._playlist_manager.save()
+                if getattr(self, "root", None) and hasattr(
+                        self.root, "refresh_playlist"
+                ):
+                    self.root.refresh_playlist()
+                toast(
+                    f"Recovered {summary.get('copied', 0)}/{summary.get('found', 0)}"
+                )
 
-        try:
-            da.request_runtime_permissions(_after_runtime_perms)
-        except Exception:
-            _after_runtime_perms(False)
+        started = start_mediastore_recovery_background(
+            self._store,
+            relative_path_prefix="Music/YouTube Music Player/",
+            dest_subdir="Downloaded/Played",
+            overwrite=False,
+            request_permission=True,
+            extract_covers=True,
+            max_workers=2,
+            max_items=None,
+            on_progress=_progress,
+            on_done=_done,
+            once_store_key="media_recovery_done",
+            force=False,
+        )
+        print("[recovery] started:", started)
 
-    def ask_for_downloads_access(self):
-        """
-        Show Android's folder picker to grant access to public Downloads (SAF).
-        On success, re-initialize the playlist manager so it starts using SAF.
-        Safe to call on desktop; it will no-op.
-        """
+    def get_thumb_path(self, title: str) -> str:
+        """Return a valid local path for a track thumbnail, or the default cover."""
+        base = get_app_writable_dir("Downloaded/Played")
+        os.makedirs(base, exist_ok=True)
+        fname = f"{utils.safe_filename(title)}.jpg"
+        path = os.path.join(base, fname)
+        return path if os.path.exists(path) else default_cover_path()
 
-        def _done(ok: bool):
+    def on_stop(self):
+        """Called by Kivy when the app is closing."""
+        self._cleanup_on_exit()
+
+    def _cleanup_on_exit(self):
+        """Centralized shutdown path; safe to call multiple times."""
+        gs = getattr(self, "gui_sounds", None)
+        if gs and hasattr(gs, "on_app_close"):
             try:
-                if ok:
-                    self._playlist_manager = PlaylistManager()
-                    root = getattr(self, "root", None)
-                    if root and hasattr(root, "refresh_playlist"):
-                        with contextlib.suppress(Exception):
-                            root.refresh_playlist()
+                gs.on_app_close()
             except Exception as e:
-                print("SAF grant handler error:", e)
+                print("on_app_close error:", e)
 
-        try:
-            DownloadsAccess().show_permission_popup(on_result=_done)
-        except Exception as e:
-            print("Unable to show Downloads picker:", e)
+    def _on_keyboard(self, window, key, scancode, codepoint, modifier):
+        if key in (27, 1001):
+            self._cleanup_on_exit()
+            return False
+        return False
 
-    def test_downloads_write(self):
-        if utils.get_platform() != 'android':
-            return
-        try:
-            da = DownloadsAccess()
-            if not getattr(da, "tree_uri", None):
-                from kivymd.toast import toast
-                toast("Downloads access not granted yet")
-                return
-            ok = da.write_text("Youtube Music Player/Downloaded/Played/.saf_probe.txt", "ok")
-            from kivymd.toast import toast
-            toast("SAF write OK ✅" if ok else "SAF write failed ❌")
-        except Exception as e:
-            try:
-                from kivymd.toast import toast
-                toast(f"SAF test error: {e}")
-            except Exception:
-                print("SAF test error:", e)
+    def _on_request_close(self, *args):
+        self._cleanup_on_exit()
+        return False
 
     def build(self):
+        Window.bind(on_request_close=self._on_request_close)
+        if not self._store.exists("init_done"):
+            self._store.put("init_done", value=True)
         self.title = "Youtube Music Player"
         icon = default_cover_path()
         self.icon = icon
@@ -1516,14 +1493,13 @@ class Musicapp(MDApp):
             Builder.load_file(p)
         except Exception as _e:
             print("library_tab.kv load error:", _e)
-
-        return GUILayout()
+        return GUILayout(store=self._store)
 
     def stop_service(self):
         if GUILayout.service:
             if utils.get_platform() == "android":
                 GUILayout.service.stop(GUILayout.service_activity)
-            elif platform in ("linux", "linux2", "macos", "win"):
+            elif platform in ("linux", "linux2", "macosx", "win"):
                 return
             else:
                 raise NotImplementedError(
@@ -1537,11 +1513,100 @@ class Musicapp(MDApp):
         return True
 
     def on_resume(self):
-        GUILayout.get_update_slider = Clock.schedule_interval(
-            GUILayout.wait_update_slider, 1
-        )
-        GUILayout.gui_resume_check()
-        GUILayout.send("iamawake", "Heelloo")
+        """
+        Resume flow:
+          1) Start safe (everything disabled/idle)
+          2) Ping service ("iamawake" + "areweplaying")
+          3) Poll for answer and set GUI accordingly
+          4) Re-enable slider/controls only if actually playing
+        """
+        app = self
+        root = app.root
+
+        GUILayout.send("iamawake", "hello")
+
+        with contextlib.suppress(Exception):
+            root.ids.slider.disabled = True
+        with contextlib.suppress(Exception):
+            if hasattr(root.ids, "next_btt"):
+                root.ids.next_btt.disabled = True
+            if hasattr(root.ids, "previous_btt"):
+                root.ids.previous_btt.disabled = True
+
+        if getattr(root, "set_gui_from_none", None):
+            with contextlib.suppress(Exception):
+                root.set_gui_from_none()
+
+        with contextlib.suppress(Exception):
+            if getattr(root, "refresh_playlist", None):
+                Clock.schedule_once(lambda dt: root.refresh_playlist(), 0)
+            if getattr(root, "_send_active_playlist_to_service", None):
+                Clock.schedule_once(
+                    lambda dt: root._send_active_playlist_to_service(), 0
+                )
+
+        with contextlib.suppress(Exception):
+            if getattr(root, "get_update_slider", None):
+                root.get_update_slider.cancel()
+        with contextlib.suppress(Exception):
+            root.get_update_slider = Clock.schedule_interval(root.wait_update_slider, 1)
+
+        with contextlib.suppress(Exception):
+            GUILayout.check_are_play = "None"
+        GUILayout.send("areweplaying", "")
+
+        def _apply_playing_state():
+            with contextlib.suppress(Exception):
+                root.ids.slider.disabled = False
+            with contextlib.suppress(Exception):
+                if hasattr(root.ids, "next_btt"):
+                    root.ids.next_btt.disabled = False
+                if hasattr(root.ids, "previous_btt"):
+                    root.ids.previous_btt.disabled = False
+            if getattr(root, "set_gui_conditions", None):
+                with contextlib.suppress(Exception):
+                    root.set_gui_conditions(1, False, True, 0)
+            elif getattr(root, "set_gui_from_check", None):
+                with contextlib.suppress(Exception):
+                    root.set_gui_from_check(0)
+
+        def _apply_idle_state():
+            with contextlib.suppress(Exception):
+                root.ids.slider.disabled = True
+            with contextlib.suppress(Exception):
+                if hasattr(root.ids, "next_btt"):
+                    root.ids.next_btt.disabled = True
+                if hasattr(root.ids, "previous_btt"):
+                    root.ids.previous_btt.disabled = True
+            if getattr(root, "set_gui_from_none", None):
+                with contextlib.suppress(Exception):
+                    root.set_gui_from_none()
+
+        poll_ev = {"ev": None}
+        timeout_ev = {"ev": None}
+
+        def _poll(dt):
+            state = getattr(GUILayout, "check_are_play", "None")
+            if state == "True":
+                with contextlib.suppress(Exception):
+                    Clock.unschedule(poll_ev["ev"])
+                with contextlib.suppress(Exception):
+                    Clock.unschedule(timeout_ev["ev"])
+                _apply_playing_state()
+            elif state == "False":
+                with contextlib.suppress(Exception):
+                    Clock.unschedule(poll_ev["ev"])
+                with contextlib.suppress(Exception):
+                    Clock.unschedule(timeout_ev["ev"])
+                _apply_idle_state()
+
+        def _timeout(dt):
+            with contextlib.suppress(Exception):
+                Clock.unschedule(poll_ev["ev"])
+            _apply_idle_state()
+
+        poll_ev["ev"] = Clock.schedule_interval(_poll, 0.25)
+        timeout_ev["ev"] = Clock.schedule_once(_timeout, 5.0)
 
 
 if __name__ == "__main__":

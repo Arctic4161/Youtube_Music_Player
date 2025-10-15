@@ -1,104 +1,112 @@
 import contextlib
 import os.path
 import random
+import threading
 import time
-from threading import Thread
 
 import requests
 import yt_dlp
+from kivymd.toast import toast
 
 import utils
-from storage_access import DownloadsAccess
 from utils import get_app_writable_dir
 
 if utils.get_platform() == "android":
     os.environ["KIVY_AUDIO"] = "android"
     from jnius import autoclass, cast
+    from androidstorage4kivy import SharedStorage
 
     PythonService = autoclass("org.kivy.android.PythonService")
     autoclass("org.jnius.NativeInvocationHandler")
 else:
     os.environ["KIVY_AUDIO"] = "gstplayer"
+import shutil
+from pathlib import Path
+
 from kivy.core.audio import SoundLoader
+from mutagen.mp4 import MP4, MP4Cover
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
+
 _WAKE = None
 _last_fg_ts = 0
 
 CLIENT = OSCClient("localhost", 3002, encoding="utf-8")
 
 
-def start_foreground_heartbeat():
-    if utils.get_platform() != "android":
-        return
+def _publish_audio_to_music(private_src_path: str) -> str | None:
+    """
+    Copy an audio file from app-private storage to the public Music collection.
+    Returns the content:// URI string if successful, else None.
+    """
+    try:
+        src = Path(private_src_path)
+        if not src.exists():
+            return None
+        ss = SharedStorage()
+        cache_dir = ss.get_cache_dir()
+        os.makedirs(cache_dir, exist_ok=True)
+        target_name = src.name if src.suffix.lower() == ".m4a" else f"{src.stem}.m4a"
+        staged = os.path.join(cache_dir, target_name)
+        shutil.copyfile(str(src), staged)
 
-    def _beat():
-        while True:
-            ensure_foreground()
-            time.sleep(45)
-
-    Thread(target=_beat, daemon=True).start()
+        return ss.copy_to_shared(private_file=staged)
+    except Exception as e:
+        print("[service] publish to Music failed:", e)
+        return None
 
 
 def ensure_foreground():
-    """Promote PythonService to a true Android foreground service (no AndroidX)."""
-    global _last_fg_ts
+    """Promote PythonService to a true Android foreground service, ASAP."""
+
     if utils.get_platform() != "android":
         return
-    if time.time() - _last_fg_ts < 5:
-        return
-    _last_fg_ts = time.time()
 
-    def _start_foreground():
-        try:
-            Context = autoclass("android.content.Context")
-            NotificationManager = autoclass("android.app.NotificationManager")
-            NotificationChannel = autoclass("android.app.NotificationChannel")
-            NotificationBuilder = autoclass("android.app.Notification$Builder")
-            VERSION = autoclass("android.os.Build$VERSION")
-            PythonServiceClass = autoclass("org.kivy.android.PythonService")
+    try:
+        Context = autoclass("android.content.Context")
+        NotificationManager = autoclass("android.app.NotificationManager")
+        NotificationChannel = autoclass("android.app.NotificationChannel")
+        NotificationBuilder = autoclass("android.app.Notification$Builder")
+        VERSION = autoclass("android.os.Build$VERSION")
+        PythonServiceClass = autoclass("org.kivy.android.PythonService")
 
-            svc = None
-            for _ in range(20):
-                try:
-                    svc = PythonServiceClass.mService
-                    if svc:
-                        break
-                except Exception:
-                    pass
-                time.sleep(0.25)
-            if not svc:
-                print("[service] ensure_foreground: mService not ready; aborting")
-                return
+        svc = None
+        for _ in range(5):
+            with contextlib.suppress(Exception):
+                svc = PythonServiceClass.mService
+                if svc:
+                    break
+            time.sleep(0.1)
+        if not svc:
+            print("[service] ensure_foreground: mService not ready; skip")
+            return
 
-            nm = cast(NotificationManager, svc.getSystemService(Context.NOTIFICATION_SERVICE))
+        nm = cast(
+            NotificationManager, svc.getSystemService(Context.NOTIFICATION_SERVICE)
+        )
+        if VERSION.SDK_INT >= 26:
             channel_id = "music_playback"
 
-            if VERSION.SDK_INT >= 26:
-                try:
-                    channel = NotificationChannel(channel_id, "Playback", NotificationManager.IMPORTANCE_LOW)
-                    nm.createNotificationChannel(channel)
-                except Exception:
-                    pass
-                builder = NotificationBuilder(svc, channel_id)
-            else:
-                builder = NotificationBuilder(svc)
+            with contextlib.suppress(Exception):
+                if nm.getNotificationChannel(channel_id) is None:
+                    ch = NotificationChannel(
+                        channel_id, "Playback", NotificationManager.IMPORTANCE_LOW
+                    )
+                    nm.createNotificationChannel(ch)
+            builder = NotificationBuilder(svc, channel_id)
+        else:
+            builder = NotificationBuilder(svc)
 
-            builder.setContentTitle("Playing music")
-            builder.setContentText("Your music continues in the background")
-            builder.setSmallIcon(svc.getApplicationInfo().icon)
-            builder.setOngoing(True)
+        builder.setContentTitle("Playing music")
+        builder.setContentText("Your music continues in the background")
+        builder.setSmallIcon(svc.getApplicationInfo().icon)
+        builder.setOngoing(True)
 
-            notification = builder.build()
-            svc.startForeground(1, notification)
-            print("[service] ensure_foreground: promoted to foreground")
-        except Exception as e:
-            print("[service] ensure_foreground failed:", e)
-
-    Thread(target=_start_foreground, daemon=True).start()
-
-
-
+        notification = builder.build()
+        svc.startForeground(1, notification)
+        print("[service] ensure_foreground: promoted to foreground")
+    except Exception as e:
+        print("[service] ensure_foreground failed:", e)
 
 
 def acquire_wakelock():
@@ -107,7 +115,7 @@ def acquire_wakelock():
     try:
         if _WAKE:
             return
-        # If we’re not running as a PythonService on Android, do nothing
+
         try:
             service = autoclass("org.kivy.android.PythonService").mService
         except Exception:
@@ -133,14 +141,31 @@ def release_wakelock():
         print("[service] wakelock release failed:", e)
     _WAKE = None
 
-with contextlib.suppress(Exception):
-    ensure_foreground()
-with contextlib.suppress(Exception):
-    start_foreground_heartbeat()
+
+def embed_cover_art_m4a_jpeg(
+    m4a_path: str,
+    jpeg_bytes: bytes,
+    title: str | None = None,
+    artist: str | None = None,
+) -> bool:
+    try:
+        audio = MP4(m4a_path)
+        audio["covr"] = [MP4Cover(jpeg_bytes, imageformat=MP4Cover.FORMAT_JPEG)]
+        if title:
+            audio["\xa9nam"] = [title]
+        if artist:
+            audio["\xa9ART"] = [artist]
+        audio.save()
+        return True
+    except Exception as e:
+        print(f"[service] embed cover failed: {e}")
+        return False
+
 
 class CustomLogger:
     def debug(self, msg):
         if not msg.startswith("[debug] "):
+            print(msg)
             self.info(msg)
 
     def info(self, msg):
@@ -160,9 +185,7 @@ class Gui_sounds:
     previous_songs = []
     set_local = None
     load_from_service = False
-    set_local_download = get_app_writable_dir(
-        "Downloaded/Played"
-    )
+    set_local_download = get_app_writable_dir("Downloaded/Played")
     cache_dire = os.path.join(os.getcwd(), "Downloaded")
     os.makedirs(cache_dire, exist_ok=True)
     shuffle_selected = False
@@ -180,9 +203,56 @@ class Gui_sounds:
     shuffle_bag = []
     _bag_source_len = 0
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._next_thread = None
+        self._next_thread_stop = threading.Event()
+
+    def start_next_monitor(self):
+        """Start (or restart) the background loop that monitors for track end/next."""
+        self.stop_next_monitor()
+        self._next_thread_stop.clear()
+        self._next_thread = threading.Thread(target=self._check_for_next_loop, name="NextMonitor", daemon=True)
+        self._next_thread.start()
+
+    def stop_next_monitor(self, join_timeout: float = 1.5):
+        """Signal the loop to stop and join the thread if it exists."""
+        with contextlib.suppress(Exception):
+            self._next_thread_stop.set()
+            t = self._next_thread
+            self._next_thread = None
+            if t and t.is_alive():
+                t.join(timeout=join_timeout)
+
+    def _check_for_next_loop(self):
+        """
+        Internal loop that replaces while True: ... in check_for_next().
+        It checks the stop flag every tick so it can shut down cleanly.
+        """
+        while not self._next_thread_stop.is_set():
+            try:
+                if (Gui_sounds.sound is not None
+                        and (Gui_sounds.paused is False or Gui_sounds.sound.state == "play")
+                        and Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1
+                ):
+                    if Gui_sounds.previous is True or Gui_sounds.sound.loop is True:
+                        continue
+                    if Gui_sounds.playlist is False or Gui_sounds.playlist == "False":
+                        Gui_sounds.send("reset_gui", "reset_gui")
+                        Gui_sounds.checking_it = None
+                        break
+                    Gui_sounds.next()
+                elif Gui_sounds.main_paused and Gui_sounds.sound is not None:
+                    if Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1:
+                        Gui_sounds.next()
+                time.sleep(1)
+            except Exception as e:
+                print("Next-monitor loop error:", e)
+            self._next_thread_stop.wait(0.25)
+
     @staticmethod
     def load(*val):
-        Gui_sounds.stop()
+        GS.stop()
         Gui_sounds.file_to_load = "".join(val)
         Gui_sounds.file_to_load = os.path.normpath(Gui_sounds.file_to_load)
         if not os.path.isfile(Gui_sounds.file_to_load):
@@ -203,25 +273,30 @@ class Gui_sounds:
         Gui_sounds.send("set_slider", str(Gui_sounds.length))
         if Gui_sounds.load_from_service:
             Gui_sounds.send("update_image", Gui_sounds.set_local)
-        Gui_sounds.play()
+        GS.play()
 
     def download_yt(self, *val):
-        setytlink, settitle, set_local, set_local_download = (
-            "".join(val).strip("']").split("', '")
+        try:
+            setytlink, settitle, set_local, set_local_download = (
+                "".join(val).strip("']").split("', '")
+            )
+        except Exception as e:
+            Gui_sounds.send("error_reset", f"bad args: {e}")
+            return
+
+        safe_title = utils.safe_filename(settitle)
+        out_dir = (
+            get_app_writable_dir("Downloaded/Played")
+            if utils.get_platform() == "android"
+            else set_local_download
         )
+        os.makedirs(out_dir, exist_ok=True)
+
+        audio_path = os.path.join(out_dir, f"{safe_title}.m4a")
+        cover_path = os.path.join(out_dir, f"{safe_title}.jpg")
+
         ydl_opts = {
-            "outtmpl": {
-                "default": (
-                    os.path.join(
-                        get_app_writable_dir(
-                            "Downloaded/Played"
-                        ),
-                        f"{settitle}.%(ext)s",
-                    )
-                    if utils.get_platform() == "android"
-                    else os.path.join(set_local_download, f"{settitle}.%(ext)s")
-                )
-            },
+            "outtmpl": {"default": os.path.join(out_dir, f"{safe_title}.%(ext)s")},
             "proxies": {"all": "socks5://154.38.180.176:443"},
             "overwrites": True,
             "format": "m4a/bestaudio",
@@ -240,125 +315,72 @@ class Gui_sounds:
         except Exception as e:
             Gui_sounds.send("error_reset", f"download failed: {e}")
             return
-        try:
-            img_data = requests.get(set_local, timeout=30).content
-        except Exception as e:
-            img_data = None
-            print(f"[service] thumbnail fetch failed: {e}")
-        if img_data:
-            if utils.get_platform() == "android":
-                try:
-                    da = DownloadsAccess()
-                    if da and da.tree_uri:
-                        da.write_bytes(
-                            f"Downloaded/Played/{settitle}.jpg",
-                            img_data,
-                        )
-                        try:
-                            priv_dir = get_app_writable_dir(
-                                "Downloaded/Played"
-                            )
-                            thumb_src = os.path.join(priv_dir, f"{settitle}.jpg")
-                            if os.path.exists(thumb_src):
-                                os.remove(thumb_src)
-                        except Exception as e:
-                            print("[service] thumb cleanup failed:", e)
-                    else:
-                        priv_dir = get_app_writable_dir(
-                            "Downloaded/Played"
-                        )
-                        with open(
-                            os.path.join(priv_dir, f"{settitle}.jpg"), "wb"
-                        ) as handler:
-                            handler.write(img_data)
-                except Exception:
-                    with open(
-                        os.path.join(set_local_download, f"{settitle}.jpg"), "wb"
-                    ) as handler:
-                        handler.write(img_data)
-            else:
-                with open(
-                    os.path.join(set_local_download, f"{settitle}.jpg"), "wb"
-                ) as handler:
-                    handler.write(img_data)
-        with contextlib.suppress(Exception):
-            if utils.get_platform() == "android":
-                da = DownloadsAccess()
-                if da and da.tree_uri:
-                    self.set_download_directory(settitle, da)
-        Gui_sounds.send("file_is_downloaded", "yep")
 
-    def set_download_directory(self, settitle, da):
-        priv_dir = get_app_writable_dir(
-            "Downloaded/Played"
-        )
-        m4a_path = os.path.join(priv_dir, f"{settitle}.m4a")
-        alt_path = None
-        if not os.path.exists(m4a_path):
-            for fn in os.listdir(priv_dir):
-                if fn.startswith(f"{settitle}."):
-                    alt_path = os.path.join(priv_dir, fn)
-                    break
-        file_src_path = m4a_path if os.path.exists(m4a_path) else alt_path
-        if file_src_path and os.path.exists(file_src_path):
-            with open(file_src_path, "rb") as fsrc:
-                data = fsrc.read()
-            da.write_bytes(
-                f"Downloaded/Played/{os.path.basename(file_src_path)}",
-                data,
-            )
+        if not os.path.exists(audio_path):
+            Gui_sounds.send("error_reset", "downloaded file not found (.m4a)")
+            if utils.get_platform() == "android":
+                with contextlib.suppress(Exception):
+                    toast("Couldn't publish to Music: file not found")
+            return
+
+        img_data = None
+        try:
+            resp = requests.get(set_local, timeout=30)
+            resp.raise_for_status()
+            img_data = resp.content
+        except Exception as e:
+            print(f"[service] thumbnail fetch failed: {e}")
+
+        if img_data:
             try:
-                if file_src_path and os.path.exists(file_src_path):
-                    os.remove(file_src_path)
-                    priv_dir = os.path.dirname(file_src_path)
-                    base = os.path.basename(file_src_path)
-                    for name in os.listdir(priv_dir):
-                        if name == f"{base}.part" or (name.startswith(base) and name.endswith(".part")):
-                            with contextlib.suppress(Exception):
-                                os.remove(os.path.join(priv_dir, name))
+                with open(cover_path, "wb") as fh:
+                    fh.write(img_data)
             except Exception as e:
-                print("[service] audio cleanup failed:", e)
+                print(f"[service] thumbnail save failed: {e}")
+
+            try:
+                if embed_cover_art_m4a_jpeg(audio_path, img_data, title=settitle):
+                    print("[service] embedded cover art into m4a")
+                    if utils.get_platform() == "android":
+                        with contextlib.suppress(Exception):
+                            toast("Embedded album art")
+            except Exception as e:
+                print(f"[service] embed cover failed: {e}")
+
+        if utils.get_platform() == "android":
+            try:
+                uri = _publish_audio_to_music(audio_path)
+                if uri:
+                    print("[service] Published to Music:", uri)
+                    with contextlib.suppress(Exception):
+                        toast("Saved to Music")
+                else:
+                    print("[service] publish to Music failed")
+                    with contextlib.suppress(Exception):
+                        toast("Publish to Music failed")
+            except Exception as e:
+                print("[service] publish exception:", e)
+                with contextlib.suppress(Exception):
+                    toast("Publish to Music failed")
+
+        Gui_sounds.send("file_is_downloaded", "yep")
 
     def update_load_fs(self, *val):
         Gui_sounds.load_from_service = False
 
-    @staticmethod
-    def play(*val):
+    def play(self, *val):
+        ensure_foreground()
+        acquire_wakelock()
         if Gui_sounds.song_local and Gui_sounds.song_local[0] > 0:
             Gui_sounds.check_for_pause()
         else:
             Gui_sounds.paused = False
             Gui_sounds.song_local = None
             Gui_sounds.previous_songs.append(os.path.basename(Gui_sounds.file_to_load))
-            ensure_foreground()
-            acquire_wakelock()
             Gui_sounds.sound.play()
             Gui_sounds.previous = False
             if Gui_sounds.checking_it is None:
-                Gui_sounds.checking_it = Thread(
-                    target=Gui_sounds.check_for_next, daemon=True
-                )
-                Gui_sounds.checking_it.start()
-
-    @staticmethod
-    def check_for_next():
-        while True:
-            if (
-                Gui_sounds.sound is not None
-                and (Gui_sounds.paused is False or Gui_sounds.sound.state == "play")
-                and Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1
-            ):
-                if Gui_sounds.previous is True or Gui_sounds.sound.loop is True:
-                    continue
-                if Gui_sounds.playlist is False or Gui_sounds.playlist == "False":
-                    Gui_sounds.send("reset_gui", "reset_gui")
-                    Gui_sounds.checking_it = None
-                    break
-                Gui_sounds.next()
-            elif Gui_sounds.main_paused and Gui_sounds.sound is not None:
-                if Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1:
-                    Gui_sounds.next()
-            time.sleep(1)
+                self.start_next_monitor()
 
     def update_slider(self, *val):
         with contextlib.suppress(AttributeError):
@@ -420,24 +442,21 @@ class Gui_sounds:
                     Gui_sounds.sound.play()
                     just_started = True
 
-            # Clear pause/previous flags so the player state is consistent
             Gui_sounds.previous = False
             Gui_sounds.paused = False
             Gui_sounds.song_local = None
 
-            # Some backends need a tiny moment after play() before seek()
             if just_started:
                 import time as _time
 
                 _time.sleep(0.05)
 
-            # Clamp within known track length if we have it
             with contextlib.suppress(Exception):
                 if Gui_sounds.length is not None:
                     secs = max(0.0, min(float(secs), float(Gui_sounds.length) - 0.1))
-            # Seek in seconds
+
             Gui_sounds.sound.seek(secs)
-            # Acknowledge new position to GUI
+
             with contextlib.suppress(Exception):
                 Gui_sounds.send("song_pos", str(int(secs)))
 
@@ -445,6 +464,7 @@ class Gui_sounds:
         Gui_sounds.paused = True
         Gui_sounds.song_local = [Gui_sounds.sound.get_pos()]
         release_wakelock()
+        self.stop_next_monitor()
         Gui_sounds.sound.stop()
 
     def pause_val(self, *val):
@@ -453,12 +473,13 @@ class Gui_sounds:
         Gui_sounds.looping_bool = False
         Gui_sounds.shuffle_bool = "False"
 
-    @staticmethod
-    def stop(*val):
+    def stop(self, *val):
         if Gui_sounds.sound is not None and Gui_sounds.sound.state == "play":
             Gui_sounds.sound.stop()
             Gui_sounds.sound.unload()
             Gui_sounds.sound = None
+        self.stop_next_monitor()
+        release_wakelock()
 
     @staticmethod
     def next(*val):
@@ -471,7 +492,7 @@ class Gui_sounds:
         Gui_sounds.paused = False
         Gui_sounds.previous = True
         Gui_sounds.load_from_service = True
-        if Gui_sounds.sound.get_pos() >= 20:
+        if Gui_sounds.sound and Gui_sounds.sound.get_pos() >= 20:
             Gui_sounds.sound.seek(0)
         else:
             Gui_sounds.check_song_change(False)
@@ -482,7 +503,7 @@ class Gui_sounds:
         if Gui_sounds.song_change is True and (
             Gui_sounds.sound is not None and Gui_sounds.sound.state == "play"
         ):
-            Gui_sounds.stop()
+            GS.stop()
         Gui_sounds.retrieving_song()
 
     @staticmethod
@@ -492,7 +513,7 @@ class Gui_sounds:
         with contextlib.suppress(TypeError):
             if Gui_sounds.song_change is True:
                 if Gui_sounds.shuffle_selected is True:
-                    # True shuffle: play every track once before reshuffling
+
                     try:
                         current = (
                             os.path.basename(Gui_sounds.file_to_load)
@@ -501,18 +522,17 @@ class Gui_sounds:
                         )
                     except Exception:
                         current = None
-                    # Rebuild bag if the playlist changed or bag is empty
+
                     need_rebuild = (
                         (not Gui_sounds.shuffle_bag)
                         or (Gui_sounds._bag_source_len != len(songs))
                         or any(item not in songs for item in Gui_sounds.shuffle_bag)
                     )
                     if need_rebuild:
-                        # Prefer excluding the current so we never immediately repeat
                         Gui_sounds._rebuild_shuffle_bag(
                             exclude_current=current if len(songs) > 1 else None
                         )
-                    # If bag is still empty (e.g., single-track playlist), fall back to current
+
                     try:
                         next_song = (
                             Gui_sounds.shuffle_bag.pop()
@@ -586,7 +606,6 @@ class Gui_sounds:
         Gui_sounds.shuffle_bool = "".join(val)
         if Gui_sounds.shuffle_bool == "True":
             Gui_sounds.shuffle_selected = True
-            # initialize a fresh shuffle bag, avoid repeating current immediately
             try:
                 current = (
                     os.path.basename(Gui_sounds.file_to_load)
@@ -645,25 +664,29 @@ class Gui_sounds:
         elif message_type == "song_not_found":
             CLIENT.send_message("/song_not_found", message)
             CLIENT.send_message("/are_we", message)
+        elif message_type == "error_reset":
+            CLIENT.send_message("/error_reset", message)
+
+GS = Gui_sounds()
 
 
 if __name__ == "__main__":
     SERVER = OSCThreadServer(encoding="utf8")
     SERVER.listen("localhost", port=3000, default=True)
-    SERVER.bind("/load", Gui_sounds.load)
-    SERVER.bind("/play", Gui_sounds.play)
-    SERVER.bind("/pause", Gui_sounds.pause)
-    SERVER.bind("/stop", Gui_sounds.stop)
-    SERVER.bind("/next", Gui_sounds.next)
-    SERVER.bind("/previous", Gui_sounds.previous_bttn)
-    SERVER.bind("/playlist", Gui_sounds.play_list)
-    SERVER.bind("/update_load_fs", Gui_sounds.update_load_fs)
-    SERVER.bind("/iamawake", Gui_sounds.refresh_gui)
-    SERVER.bind("/loop", Gui_sounds.loop)
-    SERVER.bind("/shuffle", Gui_sounds.shuffle)
-    SERVER.bind("/get_update_slider", Gui_sounds.update_slider)
-    SERVER.bind("/downloadyt", Gui_sounds.download_yt)
-    SERVER.bind("/iampaused", Gui_sounds.pause_val)
-    SERVER.bind("/seek_seconds", Gui_sounds.seek_seconds)
+    SERVER.bind("/load", GS.load)
+    SERVER.bind("/play", GS.play)
+    SERVER.bind("/pause", GS.pause)
+    SERVER.bind("/stop", GS.stop)
+    SERVER.bind("/next", GS.next)
+    SERVER.bind("/previous", GS.previous_bttn)
+    SERVER.bind("/playlist", GS.play_list)
+    SERVER.bind("/update_load_fs", GS.update_load_fs)
+    SERVER.bind("/iamawake", GS.refresh_gui)
+    SERVER.bind("/loop", GS.loop)
+    SERVER.bind("/shuffle", GS.shuffle)
+    SERVER.bind("/get_update_slider", GS.update_slider)
+    SERVER.bind("/downloadyt", GS.download_yt)
+    SERVER.bind("/iampaused", GS.pause_val)
+    SERVER.bind("/seek_seconds", GS.seek_seconds)
     while True:
         time.sleep(1)
