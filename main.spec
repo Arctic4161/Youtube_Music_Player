@@ -50,7 +50,6 @@ _hidden = [] + collect_submodules('kivymd')
 #  but listing here is harmless and sometimes helps on edge cases.)
 _extra_sources = [
     ('playlist_manager.py', '.'),
-    ('playlist_manager.py', '.'),
     ('public_persistence.py', '.'),
     ('utils.py', '.'),
     ('service_main.py', '.'),

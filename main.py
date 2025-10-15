@@ -55,6 +55,8 @@ def default_cover_path():
         "music.ico",
     ]
     for rel in candidates:
+        if getattr(sys, "frozen", False):
+            resource_add_path(sys._MEIPASS)
         if p := resource_find(rel):
             return p
     return
