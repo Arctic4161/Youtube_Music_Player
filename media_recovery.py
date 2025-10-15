@@ -187,7 +187,9 @@ def _request_read_media_audio_permission():
     with contextlib.suppress(Exception):
         from android.permissions import Permission, request_permissions
 
-        request_permissions([Permission.READ_MEDIA_AUDIO, Permission.READ_EXTERNAL_STORAGE])
+        request_permissions(
+            [Permission.READ_MEDIA_AUDIO, Permission.READ_EXTERNAL_STORAGE]
+        )
 
 
 def _query_mediastore_audio(relative_path_prefix: str) -> Iterable[Tuple[str, object]]:

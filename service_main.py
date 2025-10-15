@@ -13,8 +13,8 @@ from utils import get_app_writable_dir
 
 if utils.get_platform() == "android":
     os.environ["KIVY_AUDIO"] = "android"
-    from jnius import autoclass, cast
     from androidstorage4kivy import SharedStorage
+    from jnius import autoclass, cast
 
     PythonService = autoclass("org.kivy.android.PythonService")
     autoclass("org.jnius.NativeInvocationHandler")
@@ -212,7 +212,9 @@ class Gui_sounds:
         """Start (or restart) the background loop that monitors for track end/next."""
         self.stop_next_monitor()
         self._next_thread_stop.clear()
-        self._next_thread = threading.Thread(target=self._check_for_next_loop, name="NextMonitor", daemon=True)
+        self._next_thread = threading.Thread(
+            target=self._check_for_next_loop, name="NextMonitor", daemon=True
+        )
         self._next_thread.start()
 
     def stop_next_monitor(self, join_timeout: float = 1.5):
@@ -231,9 +233,10 @@ class Gui_sounds:
         """
         while not self._next_thread_stop.is_set():
             try:
-                if (Gui_sounds.sound is not None
-                        and (Gui_sounds.paused is False or Gui_sounds.sound.state == "play")
-                        and Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1
+                if (
+                    Gui_sounds.sound is not None
+                    and (Gui_sounds.paused is False or Gui_sounds.sound.state == "play")
+                    and Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1
                 ):
                     if Gui_sounds.previous is True or Gui_sounds.sound.loop is True:
                         continue
@@ -666,6 +669,7 @@ class Gui_sounds:
             CLIENT.send_message("/are_we", message)
         elif message_type == "error_reset":
             CLIENT.send_message("/error_reset", message)
+
 
 GS = Gui_sounds()
 

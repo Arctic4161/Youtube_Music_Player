@@ -84,17 +84,13 @@ def android_write_directory(sub: str) -> str:
     from jnius import autoclass
 
     ctx = None
-    try:
+    with contextlib.suppress(Exception):
         PythonService = autoclass("org.kivy.android.PythonService")
         ctx = PythonService.mService
-    except Exception:
-        pass
     if ctx is None:
-        try:
+        with contextlib.suppress(Exception):
             PythonActivity = autoclass("org.kivy.android.PythonActivity")
             ctx = PythonActivity.mActivity
-        except Exception:
-            pass
     if ctx is None:
         try:
             ActivityThread = autoclass("android.app.ActivityThread")

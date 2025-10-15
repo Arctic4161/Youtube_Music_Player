@@ -781,8 +781,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             default=True,
         )
         if not hasattr(self, "check_are_we_playing") or not callable(
-                getattr(self, "check_are_we_playing", None)
+            getattr(self, "check_are_we_playing", None)
         ):
+
             def _fallback_are_we(*val):
                 with contextlib.suppress(Exception):
                     GUILayout.check_are_play = "".join(val)
@@ -873,6 +874,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 return
 
             import os
+
             for p in (track_path, cover_path):
                 if p and os.path.exists(p):
                     try:
@@ -884,6 +886,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
             if pm and pid is not None:
                 import os
+
                 norm_target = os.path.normpath(os.path.realpath(track_path))
 
                 try:
@@ -906,11 +909,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 if remove_index is not None:
                     try:
                         pm.remove_track(pid, remove_index)
-                        pm.save()  # persist
+                        pm.save()
                     except Exception as e:
                         print(f"Warning: playlist removal failed: {e}")
                 else:
-                    print("Note: track not found in playlist; data may already be in sync.")
+                    print(
+                        "Note: track not found in playlist; data may already be in sync."
+                    )
 
             with contextlib.suppress(Exception):
                 self._reload_playlist_view()
@@ -961,7 +966,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         elif raw.startswith('["') and raw.endswith('"]'):
             raw = raw[2:-2]
         if (raw.startswith("'") and raw.endswith("'")) or (
-                raw.startswith('"') and raw.endswith('"')
+            raw.startswith('"') and raw.endswith('"')
         ):
             raw = raw[1:-1]
         filename = os.path.basename(raw)
@@ -1422,12 +1427,10 @@ class Musicapp(MDApp):
                 )
                 self._playlist_manager.save()
                 if getattr(self, "root", None) and hasattr(
-                        self.root, "refresh_playlist"
+                    self.root, "refresh_playlist"
                 ):
                     self.root.refresh_playlist()
-                toast(
-                    f"Recovered {summary.get('copied', 0)}/{summary.get('found', 0)}"
-                )
+                toast(f"Recovered {summary.get('copied', 0)}/{summary.get('found', 0)}")
 
         started = start_mediastore_recovery_background(
             self._store,
