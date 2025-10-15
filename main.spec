@@ -50,11 +50,11 @@ _hidden = [] + collect_submodules('kivymd')
 #  but listing here is harmless and sometimes helps on edge cases.)
 _extra_sources = [
     ('playlist_manager.py', '.'),
-    ('playlist_manager_saf_wrapper.py', '.'),
-    ('storage_access.py', '.'),
+    ('playlist_manager.py', '.'),
+    ('public_persistence.py', '.'),
     ('utils.py', '.'),
-    # Service entrypoint lives in a subfolder:
-    ('service/service_main.py', 'service'),
+    ('service_main.py', '.'),
+    ('media_recovery.py', '.'),
 ]
 
 # Convert extra sources to datas so they're shipped alongside the app

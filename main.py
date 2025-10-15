@@ -120,13 +120,18 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def _start_music_service_user_initiated(self):
         PythonActivity = autoclass("org.kivy.android.PythonActivity")
-        ContextCompat = autoclass("androidx.core.content.ContextCompat")
         Intent = autoclass("android.content.Intent")
+        VERSION = autoclass("android.os.Build$VERSION")
+
         mActivity = PythonActivity.mActivity
         pkg = mActivity.getPackageName()
         SvcClass = autoclass(f"{pkg}.ServiceMusicservice")
         intent = Intent(mActivity, SvcClass)
-        ContextCompat.startForegroundService(mActivity, intent)
+
+        if VERSION.SDK_INT >= 26:
+            mActivity.startForegroundService(intent)
+        else:
+            mActivity.startService(intent)
 
     def reset_for_new_query(self):
         """Clear time + status and hide the slider before a new search/load kicks off."""

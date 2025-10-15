@@ -89,7 +89,7 @@
             min_width: dp(160)
             padding: dp(8)
             style: "filled"
-            size_hint_x: 0.35
+            size_hint_x: 0.4
             MDBoxLayout:
                 orientation: "vertical"
                 spacing: dp(8)
@@ -100,6 +100,8 @@
                         text: "Playlists"
                         bold: True
                     MDFillRoundFlatIconButton:
+                        size_hint_y: 0.7
+                        size_hint_x: 0.2
                         text: "New"
                         icon: "plus"
                         on_release: app.root._playlist_prompt_new()
@@ -133,6 +135,8 @@
                         text: "Tracks"
                         bold: True
                     MDFillRoundFlatIconButton:
+                        size_hint_y: 0.7
+                        size_hint_x: 0.2
                         text: "Import"
                         icon: "file-plus"
                         on_release: app.root._playlist_import_selective()
