@@ -165,7 +165,6 @@ def embed_cover_art_m4a_jpeg(
 class CustomLogger:
     def debug(self, msg):
         if not msg.startswith("[debug] "):
-            print(msg)
             self.info(msg)
 
     def info(self, msg):
@@ -281,7 +280,7 @@ class Gui_sounds:
     def download_yt(self, *val):
         try:
             setytlink, settitle, set_local, set_local_download = (
-                "".join(val).strip("']").split("', '")
+                "".join(val).strip("['']").split("', '")
             )
         except Exception as e:
             Gui_sounds.send("error_reset", f"bad args: {e}")

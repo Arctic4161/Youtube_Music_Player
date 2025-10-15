@@ -138,17 +138,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def reset_for_new_query(self):
         """Clear time + status and hide the slider before a new search/load kicks off."""
         app = MDApp.get_running_app()
-        root = app.root
-
-        with contextlib.suppress(Exception):
-            root.ids.info.text = ""
-
-        with contextlib.suppress(Exception):
-            root.ids.song_position.text = ""
-            root.ids.song_max.text = ""
-
-        with contextlib.suppress(Exception):
-            self.ids.cover.source = default_cover_path()
+        app.root.ids.info.text = ""
+        app.root.ids.song_position.text = ""
+        app.root.ids.song_max.text = ""
+        app.root.ids.imageView.source = default_cover_path()
+        app.root.ids.song_position.opacity = 0
+        app.root.ids.song_max.opacity = 0
 
         if GUILayout.slider is not None:
             with contextlib.suppress(Exception):
@@ -204,11 +199,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             root.ids.imageView.source = os.path.join(
                 os.path.dirname(__file__), "music.png"
             )
-        with contextlib.suppress(Exception):
-            root.ids.song_title.text = ""
-            root.ids.info.text = ""
-            root.ids.song_position.text = ""
-            root.ids.song_max.text = ""
+        root.ids.song_title.text = ""
+        root.ids.info.text = ""
+        root.ids.song_position.text = ""
+        root.ids.song_max.text = ""
         with contextlib.suppress(Exception):
             root.ids.play_btt.opacity = 0
             root.ids.play_btt.disabled = True
@@ -372,7 +366,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def on_kv_post(self, base_widget):
         with contextlib.suppress(Exception):
-            self.ids.cover.source = default_cover_path()
+            self.ids.imageView.source = default_cover_path()
         try:
             self.library_tab = Factory.LibraryTab()
             self.ids.bottom_nav.add_widget(self.library_tab)
@@ -937,7 +931,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             toast("Delete failed.")
 
     def getting_song(self, message):
-        self.reset_for_new_query()
         with contextlib.suppress(Exception):
             self._send_active_playlist_to_service()
         GUILayout.send("update_load_fs", "update_load_fs")
@@ -1139,6 +1132,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.repeat_btt.opacity = 1
         MDApp.get_running_app().root.ids.next_btt.opacity = 1
         MDApp.get_running_app().root.ids.previous_btt.opacity = 1
+        MDApp.get_running_app().root.ids.song_position.opacity = 1
+        MDApp.get_running_app().root.ids.song_max.opacity = 1
 
     def error_reset(self, msg):
         MDApp.get_running_app().root.ids.imageView.source = default_cover_path()
