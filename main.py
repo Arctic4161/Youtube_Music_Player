@@ -11,7 +11,17 @@ from utils import get_app_writable_dir
 if utils.get_platform() != "android":
     os.environ["KIVY_AUDIO"] = "gstplayer"
 else:
-    from jnius import autoclass
+    import android
+    from android.permissions import Permission, request_permissions
+
+    request_permissions(
+        [
+            Permission.READ_MEDIA_AUDIO,
+            Permission.READ_EXTERNAL_STORAGE,
+            Permission.POST_NOTIFICATIONS,
+        ]
+    )
+
 from kivy.storage.jsonstore import JsonStore
 
 from public_persistence import try_restore_playlists, wire_public_export
@@ -47,7 +57,6 @@ from oscpy.server import OSCThreadServer
 from youtubesearchpython import VideosSearch
 
 from playlist_manager import PlaylistManager
-
 
 def default_cover_path():
     candidates = [
@@ -121,19 +130,18 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     os.makedirs(set_local_download, exist_ok=True)
 
     def _start_music_service_user_initiated(self):
-        PythonActivity = autoclass("org.kivy.android.PythonActivity")
-        Intent = autoclass("android.content.Intent")
-        VERSION = autoclass("android.os.Build$VERSION")
-
-        mActivity = PythonActivity.mActivity
-        pkg = mActivity.getPackageName()
-        SvcClass = autoclass(f"{pkg}.ServiceMusicservice")
-        intent = Intent(mActivity, SvcClass)
-
-        if VERSION.SDK_INT >= 26:
-            mActivity.startForegroundService(intent)
-        else:
-            mActivity.startService(intent)
+        if utils.get_platform() != "android":
+            return
+        try:
+            GUILayout.service = android.start_service(
+                "Music Player",
+                "Playing in background",
+                "musicservice",
+            )
+            print("[service] started via android.start_service")
+            return
+        except Exception as e:
+            print("[service] android.start_service unavailable:", e)
 
     def reset_for_new_query(self):
         """Clear time + status and hide the slider before a new search/load kicks off."""
@@ -767,10 +775,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.playlist = False
         self.repeat_selected = False
         self.shuffle_selected = False
-        if platform in ("linux", "macosx", "win"):
+        if utils.get_platform() == "android":
+            self._start_music_service_user_initiated()
+        else:
             GUILayout.service = Thread(
                 target=run_path,
-                args=[os.path.join(os.path.dirname(__file__), "service_main.py")],
+                args=[os.path.join(os.path.dirname(__file__), "./service/main.py")],
                 kwargs={"run_name": "__main__"},
                 daemon=True,
             )
@@ -1044,6 +1054,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         return [os.path.basename(i) for i in time_sorted_list if i.endswith("m4a")]
 
     def new_search(self):
+        self._start_music_service_user_initiated()
         self.reset_for_new_query()
         self.shuffle_selected = False
         MDApp.get_running_app().root.ids.shuffle_btt.text_color = 0, 0, 0, 1
@@ -1062,11 +1073,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.stop()
         if self.results_loaded is False:
             try:
-                if MDApp.get_running_app().root.ids.input_box.text != "":
-
-                    self.video_search = VideosSearch(
-                        MDApp.get_running_app().root.ids.input_box.text
-                    )
+                search_text = str(MDApp.get_running_app().root.ids.input_box.text)
+                if search_text != "":
+                    self.video_search = VideosSearch(search_text)
                 elif MDApp.get_running_app().root.ids.song_title.text != "":
                     self.video_search = VideosSearch(
                         MDApp.get_running_app().root.ids.song_title.text
@@ -1074,7 +1083,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 else:
                     return
             except TypeError as e:
-                print(e)
                 self.error_reset("search")
                 return
             self.result = self.video_search.result()
@@ -1139,27 +1147,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.imageView.source = default_cover_path()
         if msg == "search":
             MDApp.get_running_app().root.ids.info.text = "Error Searching Music"
-            MDApp.get_running_app().root.ids.play_btt.opacity = 0
-            MDApp.get_running_app().root.ids.play_btt.disabled = True
+            self._reset_to_startup_gui
         elif msg == "download":
             MDApp.get_running_app().root.ids.info.text = "Error downloading Music"
-            MDApp.get_running_app().root.ids.play_btt.opacity = 1
-            MDApp.get_running_app().root.ids.play_btt.disabled = False
-        if GUILayout.slider is not None:
-            GUILayout.slider.disabled = True
-            GUILayout.slider.opacity = 0
-        MDApp.get_running_app().root.ids.song_position.text = ""
-        MDApp.get_running_app().root.ids.song_max.text = ""
-        MDApp.get_running_app().root.ids.pause_btt.disabled = True
-        MDApp.get_running_app().root.ids.pause_btt.opacity = 0
-        MDApp.get_running_app().root.ids.repeat_btt.disabled = True
-        GUILayout.get_update_slider.cancel()
+        self._reset_to_startup_gui
         self.paused = False
         self.file_loaded = False
 
     def download_yt(self):
-        if utils.get_platform() == "android":
-            self._start_music_service_user_initiated()
         MDApp.get_running_app().root.ids.next_btt.disabled = True
         MDApp.get_running_app().root.ids.previous_btt.disabled = True
         MDApp.get_running_app().root.ids.info.text = "Downloading audio... Please wait"
@@ -1243,8 +1238,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.previous_btt.disabled = False
 
     def playing(self):
-        if utils.get_platform() == "android":
-            self._start_music_service_user_initiated()
         GUILayout.get_update_slider = Clock.schedule_interval(
             self.wait_update_slider, 1
         )
@@ -1412,7 +1405,6 @@ class Musicapp(MDApp):
             return
 
         def _progress(done, total, name):
-
             with contextlib.suppress(Exception):
                 pct = int((done / total) * 100)
                 print(f"[recovery] {done}/{total} • {pct}% • {name}")

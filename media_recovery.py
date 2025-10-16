@@ -13,6 +13,9 @@ from mutagen.mp4 import MP4
 import utils
 from utils import get_app_writable_dir
 
+if utils.get_platform() == "android":
+    from jnius import autoclass
+
 ProgressCb = Optional[Callable[[int, int, str], None]]
 DoneCb = Optional[Callable[[dict], None]]
 
@@ -60,12 +63,9 @@ def start_mediastore_recovery_background(
         )
         return False
 
-    if request_permission:
-        _request_read_media_audio_permission()
-
-    rows = list(_query_mediastore_audio(relative_path_prefix))
-    if not rows:
-        rows = list(_query_mediastore_audio("Music/"))
+    rows = list(_query_mediastore_audio(relative_path_prefix)) or list(
+        _query_mediastore_audio("Music/")
+    )
     total = len(rows)
     if total == 0:
         _dispatch_done(
@@ -183,27 +183,33 @@ def _dispatch_done(cb: DoneCb, summary: dict):
         cb(summary)
 
 
-def _request_read_media_audio_permission():
-    with contextlib.suppress(Exception):
-        from android.permissions import Permission, request_permissions
-
-        request_permissions(
-            [Permission.READ_MEDIA_AUDIO, Permission.READ_EXTERNAL_STORAGE]
-        )
-
-
 def _query_mediastore_audio(relative_path_prefix: str) -> Iterable[Tuple[str, object]]:
     rows: list[Tuple[str, object]] = []
     try:
-        from jnius import autoclass
-
         MediaStore = autoclass("android.provider.MediaStore")
+        AudioMedia = autoclass(
+            "android.provider.MediaStore$Audio$Media"
+        )  # <-- inner class needs $
         ContentUris = autoclass("android.content.ContentUris")
         PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        BuildVersion = autoclass("android.os.Build$VERSION")
 
         activity = PythonActivity.mActivity
         cr = activity.getContentResolver()
-        uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        try:
+            sdk = BuildVersion.SDK_INT
+        except Exception:
+            sdk = 0
+
+        if sdk >= 29:
+            try:
+                uri = AudioMedia.getContentUri(
+                    MediaStore.VOLUME_EXTERNAL
+                )  # "external" volume
+            except Exception:
+                uri = AudioMedia.getContentUri("external")  # OEM fallback
+        else:
+            uri = AudioMedia.EXTERNAL_CONTENT_URI
 
         projection = ["_id", "display_name", "mime_type", "relative_path"]
         selection = "mime_type LIKE ? AND relative_path LIKE ?"
@@ -229,8 +235,6 @@ def _query_mediastore_audio(relative_path_prefix: str) -> Iterable[Tuple[str, ob
 
 def _copy_from_mediastore_to_private(content_uri, dest_path: str) -> bool:
     try:
-        from jnius import autoclass
-
         PythonActivity = autoclass("org.kivy.android.PythonActivity")
         activity = PythonActivity.mActivity
         cr = activity.getContentResolver()
