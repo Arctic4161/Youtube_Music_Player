@@ -14,32 +14,9 @@ if utils.get_platform() == "android":
     os.environ["KIVY_AUDIO"] = "android"
     os.environ.setdefault("KIVY_WINDOW", "mock")
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-    from androidstorage4kivy import SharedStorage
     from jnius import autoclass, cast
-    PythonService = autoclass('org.kivy.android.PythonService')
-    autoclass('org.jnius.NativeInvocationHandler')
-    NotificationManager = autoclass("android.app.NotificationManager")
-    NotificationChannel = autoclass("android.app.NotificationChannel")
-    NotificationCompat = autoclass("androidx.core.app.NotificationCompat")
-    NotificationBuilder = autoclass("androidx.core.app.NotificationCompat$Builder")
-    svc = PythonService.mService
-    ctx = svc.getApplicationContext()
-    channel_id = "music_fg"
-    nm = cast("android.app.NotificationManager",
-              ctx.getSystemService(ctx.NOTIFICATION_SERVICE))
-    ch = NotificationChannel(channel_id, "Playback", NotificationManager.IMPORTANCE_LOW)
-    nm.createNotificationChannel(ch)
-    builder = NotificationBuilder(ctx, channel_id)
-    builder.setSmallIcon(ctx.getApplicationInfo().icon)
-    builder.setContentTitle("Playing")
-    builder.setContentText("Music Player is active")
-    builder.setOngoing(True)
-    notification = builder.build()
-    svc.startForeground(1, notification)
 else:
     os.environ["KIVY_AUDIO"] = "gstplayer"
-import shutil
-from pathlib import Path
 
 from kivy.core.audio import SoundLoader
 from mutagen.mp4 import MP4, MP4Cover
@@ -47,32 +24,107 @@ from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
 
 _WAKE = None
+_AUDIO_FOCUS_REQ = None
 
 CLIENT = OSCClient("localhost", 3002, encoding="utf-8")
 
 
-def _publish_audio_to_music(private_src_path: str) -> str | None:
-    """
-    Copy an audio file from app-private storage to the public Music collection.
-    Returns the content:// URI string if successful, else None.
-    """
-    try:
-        src = Path(private_src_path)
-        if not src.exists():
-            return None
-        ss = SharedStorage()
-        cache_dir = ss.get_cache_dir()
-        os.makedirs(cache_dir, exist_ok=True)
-        target_name = src.name if src.suffix.lower() == ".m4a" else f"{src.stem}.m4a"
-        staged = os.path.join(cache_dir, target_name)
-        shutil.copyfile(str(src), staged)
+def request_audio_focus_plain(ctx):
+    """Request permanent media focus while playing (no listener)."""
+    global _AUDIO_FOCUS_REQ
+    AudioManager = autoclass('android.media.AudioManager')
+    AudioAttributes = autoclass('android.media.AudioAttributes')
+    AttrBuilder = autoclass('android.media.AudioAttributes$Builder')
+    AudioFocusRequest = autoclass('android.media.AudioFocusRequest')
+    AFRBuilder = autoclass('android.media.AudioFocusRequest$Builder')
 
-        return ss.copy_to_shared(private_file=staged)
-    except Exception as e:
-        print("[service] publish to Music failed:", e)
-        return None
+    attrs = (AttrBuilder()
+             .setUsage(AudioAttributes.USAGE_MEDIA)
+             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+             .build())
+
+    afr = (AFRBuilder(AudioManager.AUDIOFOCUS_GAIN)
+           .setAudioAttributes(attrs)
+           .build())           # no listener → no SIGSEGV
+
+    am = cast('android.media.AudioManager', ctx.getSystemService(ctx.AUDIO_SERVICE))
+    ok = False
+    try:
+        ok = am.requestAudioFocus(afr) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        if ok:
+            _AUDIO_FOCUS_REQ = afr
+    except Exception:
+        ok = True
+    return ok
+
+def abandon_audio_focus(ctx):
+    """Give focus back when paused/stopped."""
+    global _AUDIO_FOCUS_REQ
+    if not _AUDIO_FOCUS_REQ:
+        return
+    AudioManager = autoclass('android.media.AudioManager')
+    am = cast('android.media.AudioManager', ctx.getSystemService(ctx.AUDIO_SERVICE))
+    with contextlib.suppress(Exception):
+        am.abandonAudioFocusRequest(_AUDIO_FOCUS_REQ)
+    _AUDIO_FOCUS_REQ = None
+
+
+def wait_for_service_ctx(timeout_s: float = 6.0):
+    PythonService = autoclass("org.kivy.android.PythonService")
+    autoclass("org.jnius.NativeInvocationHandler")
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        if svc := PythonService.mService:
+            return svc.getApplicationContext(), svc
+        time.sleep(0.05)
+    return None, None
+
+
+def ensure_foreground(ctx, svc):
+    NotificationManager = autoclass("android.app.NotificationManager")
+    NotificationChannel = autoclass("android.app.NotificationChannel")
+    channel_id = "music_fg"
+    nm = cast("android.app.NotificationManager", ctx.getSystemService(ctx.NOTIFICATION_SERVICE))
+    ch = NotificationChannel(channel_id, "Playback", NotificationManager.IMPORTANCE_LOW)
+    nm.createNotificationChannel(ch)
+
+    try:
+        NotificationBuilder = autoclass("androidx.core.app.NotificationCompat$Builder")
+        b = NotificationBuilder(ctx, channel_id)
+    except Exception:
+        NotificationBuilder = autoclass("android.app.Notification$Builder")
+        b = NotificationBuilder(ctx, channel_id)
+
+    b.setSmallIcon(ctx.getApplicationInfo().icon)
+    b.setContentTitle("Playing")
+    b.setContentText("Music Player is active")
+    b.setOngoing(True)
+    svc.startForeground(1, b.build())
+
+
+def setup_media_session(ctx):
+    MediaSession = autoclass("android.media.session.MediaSession")
+    PlaybackState = autoclass("android.media.session.PlaybackState")
+    Builder = autoclass("android.media.session.PlaybackState$Builder")
+    session = MediaSession(ctx, "MusicPlayer")
+    state = (
+        Builder()
+        .setActions(
+            PlaybackState.ACTION_PLAY
+            | PlaybackState.ACTION_PAUSE
+            | PlaybackState.ACTION_PLAY_PAUSE
+            | PlaybackState.ACTION_STOP
+        )
+        .setState(PlaybackState.STATE_PLAYING, 0, 1.0)
+        .build()
+    )
+    session.setPlaybackState(state)
+    session.setActive(True)
+    return session
+
 
 def acquire_wakelock():
+    global _WAKE
     if utils.get_platform() != "android":
         return
     PythonService = autoclass("org.kivy.android.PythonService")
@@ -85,6 +137,7 @@ def acquire_wakelock():
     wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "player:wakelock")
     wl.setReferenceCounted(False)
     wl.acquire()
+    _WAKE = wl
 
 
 def release_wakelock():
@@ -162,6 +215,9 @@ class Gui_sounds:
         super().__init__(*args, **kwargs)
         self._next_thread = None
         self._next_thread_stop = threading.Event()
+        if utils.get_platform() == 'android':
+            self.PlaybackState = autoclass("android.media.session.PlaybackState")
+            self.B = autoclass("android.media.session.PlaybackState$Builder")
 
     def start_next_monitor(self):
         """Start (or restart) the background loop that monitors for track end/next."""
@@ -273,16 +329,9 @@ class Gui_sounds:
         except Exception as e:
             Gui_sounds.send("error_reset", f"download failed: {e}")
             return
-
         if not os.path.exists(audio_path):
             Gui_sounds.send("error_reset", "downloaded file not found (.m4a)")
-            if utils.get_platform() == "android":
-                with contextlib.suppress(Exception):
-                    Gui_sounds.send(
-                        "data_info", "Couldn't publish to Music: file not found"
-                    )
             return
-
         img_data = None
         try:
             resp = requests.get(set_local, timeout=30)
@@ -307,28 +356,20 @@ class Gui_sounds:
             except Exception as e:
                 print(f"[service] embed cover failed: {e}")
 
-        if utils.get_platform() == "android":
-            try:
-                if uri := _publish_audio_to_music(audio_path):
-                    print("[service] Published to Music:", uri)
-                    with contextlib.suppress(Exception):
-                        Gui_sounds.send("data_info", "Saved to Music")
-                else:
-                    print("[service] publish to Music failed")
-                    with contextlib.suppress(Exception):
-                        Gui_sounds.send("data_info", "Publish to Music failed")
-            except Exception as e:
-                print("[service] publish exception:", e)
-                with contextlib.suppress(Exception):
-                    Gui_sounds.send("data_info", "Publish to Music failed")
-
         Gui_sounds.send("file_is_downloaded", "yep")
 
     def update_load_fs(self, *val):
         Gui_sounds.load_from_service = False
 
     def play(self, *val):
-        acquire_wakelock()
+        if utils.get_platform() == "android":
+            acquire_wakelock()
+            ctx, _ = wait_for_service_ctx()
+            if ctx:
+                request_audio_focus_plain(ctx)
+            if "_SESSION" in globals():
+                state = self.B().setState(self.PlaybackState.STATE_PLAYING, 0, 1.0).build()
+                _SESSION.setPlaybackState(state)
         if Gui_sounds.song_local and Gui_sounds.song_local[0] > 0:
             Gui_sounds.check_for_pause()
         else:
@@ -417,9 +458,16 @@ class Gui_sounds:
     def pause(self, *val):
         Gui_sounds.paused = True
         Gui_sounds.song_local = [Gui_sounds.sound.get_pos()]
-        release_wakelock()
         self.stop_next_monitor()
         Gui_sounds.sound.stop()
+        if utils.get_platform() == "android":
+            release_wakelock()
+            ctx, _ = wait_for_service_ctx()
+            if ctx:
+                abandon_audio_focus(ctx)
+            if "_SESSION" in globals():
+                state = self.B().setState(self.PlaybackState.STATE_PAUSED, 0, 0.0).build()
+                _SESSION.setPlaybackState(state)
 
     def pause_val(self, *val):
         Gui_sounds.main_paused = True
@@ -435,9 +483,9 @@ class Gui_sounds:
         self.stop_next_monitor()
         if utils.get_platform() == "android":
             release_wakelock()
-            PythonService = autoclass("org.kivy.android.PythonService")
-            if svc := PythonService.mService:
-                svc.stopForeground(False)
+            ctx, _ = wait_for_service_ctx()
+            if ctx:
+                abandon_audio_focus(ctx)
 
     @staticmethod
     def next(*val):
@@ -630,6 +678,13 @@ GS = Gui_sounds()
 
 
 if __name__ == "__main__":
+    if utils.get_platform() == "android":
+        ctx, svc = wait_for_service_ctx()
+        if ctx and svc:
+            ensure_foreground(ctx, svc)
+            _SESSION = setup_media_session(ctx)
+        else:
+            print("[service] no service ctx; cannot start foreground")
     SERVER = OSCThreadServer(encoding="utf8")
     SERVER.listen("localhost", port=3000, default=True)
     SERVER.bind("/load", GS.load)

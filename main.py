@@ -5,7 +5,6 @@ import time
 from runpy import run_path
 
 import utils
-from media_recovery import start_mediastore_recovery_background
 from utils import get_app_writable_dir
 
 if utils.get_platform() != "android":
@@ -22,9 +21,9 @@ else:
         ]
     )
 
+from kivy.graphics import Color, Rectangle
 from kivy.storage.jsonstore import JsonStore
-
-from public_persistence import try_restore_playlists, wire_public_export
+from kivy.uix.widget import Widget
 
 kivy_home = get_app_writable_dir("Downloaded")
 os.makedirs(kivy_home, exist_ok=True)
@@ -38,7 +37,7 @@ from kivy.core.window import Window
 from kivy.factory import Factory
 from kivy.lang import Builder
 from kivy.metrics import dp, sp
-from kivy.properties import ObjectProperty, StringProperty
+from kivy.properties import NumericProperty, ObjectProperty, StringProperty
 from kivy.resources import resource_add_path, resource_find
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.scrollview import ScrollView
@@ -58,6 +57,7 @@ from youtubesearchpython import VideosSearch
 
 from playlist_manager import PlaylistManager
 
+
 def default_cover_path():
     candidates = [
         "music.png",
@@ -73,6 +73,177 @@ def default_cover_path():
 
 class RecycleViewRow(BoxLayout):
     text = StringProperty()
+
+
+class PlaylistTrackRow(MDBoxLayout):
+    text = StringProperty("")
+    index = NumericProperty(0)
+
+    _dragging = False
+    _down_pos = (0, 0)
+    _moved = False
+    # --- Long-press config (desktop friendly) ---
+    LONG_PRESS_S = 0.35  # seconds before drag can start
+    MOVE_CANCEL_PX = dp(8)  # small jitter allowance
+
+    # internal state
+    _lp_ev = None
+    _longpress_fired = False
+    _pending_touch = None
+    _down_ts = 0.0
+
+    def _cancel_longpress(self):
+        if self._lp_ev is not None:
+            from kivy.clock import Clock
+
+            with contextlib.suppress(Exception):
+                Clock.unschedule(self._lp_ev)
+            self._lp_ev = None
+        self._pending_touch = None
+
+    def _maybe_start_drag(self, touch):
+        if self._dragging:
+            return True
+        self._longpress_fired = True
+        with contextlib.suppress(Exception):
+            touch.grab(self)
+        self._start_drag(touch)
+        return True
+
+    def _fire_longpress(self, _dt):
+        t = self._pending_touch
+        if t is None:
+            return
+        # snap anchor to current pointer so the first drag frame is aligned
+        self._down_pos = t.pos
+
+        self._longpress_fired = True
+        with contextlib.suppress(Exception):
+            t.grab(self)
+        self._start_drag(t)
+
+    def _start_drag(self, touch):
+        self._dragging = True
+        self.opacity = 0.5
+        app = MDApp.get_running_app()
+        src_idx = None
+        try:
+            src_idx = app.root._index_at_touch(touch)
+        except Exception:
+            pass
+        if src_idx is None:
+            src_idx = int(self.index)
+
+        try:
+            app.root._playlist_begin_drag(int(src_idx))
+            app.root._playlist_drag_to(touch)
+        except Exception as e:
+            print("[drag] _playlist_begin_drag/_drag_to error:", e)
+
+    def on_touch_down(self, touch):
+        # Desktop: only left mouse button initiates interactions
+        if hasattr(touch, "button") and touch.button != "left":
+            return super().on_touch_down(touch)
+        if not self.collide_point(*touch.pos):
+            return super().on_touch_down(touch)
+
+        # Let delete button handle itself
+        d = self.ids.get("delete_btn")
+        if d:
+            try:
+                x1, y1 = d.to_window(0, 0)
+                x2, y2 = x1 + d.width, y1 + d.height
+                tx, ty = touch.pos
+                if x1 <= tx <= x2 and y1 <= ty <= y2:
+                    return super().on_touch_down(touch)
+            except Exception:
+                pass
+
+        # Prepare long-press
+        self._dragging = False
+        self._moved = False
+        self._down_pos = touch.pos
+        self._down_ts = time.time()
+        self._longpress_fired = False
+        self._pending_touch = touch
+
+        from kivy.clock import Clock
+
+        self._cancel_longpress()
+        self._lp_ev = Clock.schedule_once(
+            self._fire_longpress, float(self.LONG_PRESS_S)
+        )
+
+        # Consume the gesture so short click logic stays here
+        return True
+
+    def on_touch_move(self, touch):
+        if hasattr(touch, "button") and touch.button != "left":
+            return super().on_touch_move(touch)
+
+        dx = touch.pos[0] - self._down_pos[0]
+        dy = touch.pos[1] - self._down_pos[1]
+        moved_far = (dx * dx + dy * dy) ** 0.5 > float(self.MOVE_CANCEL_PX)
+        self._moved = self._moved or moved_far
+
+        # If hold time already elapsed, begin drag on first move (robust on Windows)
+        if (
+            (not self._dragging)
+            and (not self._longpress_fired)
+            and (
+                self._down_ts
+                and (time.time() - self._down_ts) >= float(self.LONG_PRESS_S)
+            )
+        ):
+            self._cancel_longpress()
+            self._down_pos = touch.pos
+            self._maybe_start_drag(touch)
+            return True
+
+        # Cancel timer if user moved a lot before long-press
+        if not self._longpress_fired and moved_far:
+            self._cancel_longpress()
+
+        if touch.grab_current is self:
+            if self._dragging:
+                with contextlib.suppress(Exception):
+                    MDApp.get_running_app().root._playlist_drag_to(touch)
+                return True
+            return True
+
+        return super().on_touch_move(touch)
+
+    def on_touch_up(self, touch):
+        self._cancel_longpress()
+
+        if touch.grab_current is self:
+            with contextlib.suppress(Exception):
+                touch.ungrab(self)
+            if self._dragging:
+                self._dragging = False
+                self.opacity = 1
+                with contextlib.suppress(Exception):
+                    MDApp.get_running_app().root._playlist_end_drag(touch)
+                return True
+            return True
+
+        # Short click plays (unless it's over the delete button)
+        if self.collide_point(*touch.pos) and not self._moved:
+            d = self.ids.get("delete_btn")
+            if d:
+                try:
+                    x1, y1 = d.to_window(0, 0)
+                    x2, y2 = x1 + d.width, y1 + d.height
+                    tx, ty = touch.pos
+                    if x1 <= tx <= x2 and y1 <= ty <= y2:
+                        return True
+                except Exception:
+                    pass
+            with contextlib.suppress(Exception):
+                MDApp.get_running_app().root._playlist_play_index(self.index)
+            return True
+
+        return super().on_touch_up(touch)
 
 
 class MySlider(MDSlider):
@@ -128,6 +299,182 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     image_path = default_cover_path()
     set_local_download = get_app_writable_dir("Downloaded/Played")
     os.makedirs(set_local_download, exist_ok=True)
+
+    def _rv_container(self):
+        """Return (rv, container, layout_manager) for the tracks list."""
+        try:
+            rv = self.library_tab.ids.rv_tracks
+        except Exception:
+            return None, None, None
+
+        lm = getattr(rv, "layout_manager", None)
+
+        # KivyMD sometimes exposes view_port; otherwise the first child is the internal container
+        container = getattr(lm, "view_port", None)
+        if container is None:
+            container = rv.children[0] if rv.children else None
+
+        return rv, container, lm
+
+    def _visible_rows(self):
+        """Return realized row widgets currently in viewport (PlaylistTrackRow)."""
+        rv, container, lm = self._rv_container()
+        if not rv or not container:
+            return []
+
+        # Prefer layout_manager.children when present; else container.children
+        rows = []
+        return (
+            [w for w in lm.children if hasattr(w, "index")]
+            if lm is not None and hasattr(lm, "children")
+            else [w for w in getattr(container, "children", []) if hasattr(w, "index")]
+        )
+
+    def _index_at_touch(self, touch):
+        """Map a touch (window coords) to a target row index (int) or None."""
+        rows = self._visible_rows()
+        if not rows:
+            return None
+        tx, ty = touch.pos
+        # Find the row whose vertical span contains the touch, using window coords
+        for r in rows:
+            try:
+                x1, y1 = r.to_window(0, 0)
+                x2, y2 = x1 + r.width, y1 + r.height
+                if y1 <= ty <= y2:
+                    return int(getattr(r, "index", 0))
+            except Exception:
+                pass
+        # If between rows or above/below, clamp to nearest visible index
+        try:
+            centers = []
+            for r in rows:
+                _, cy = r.to_window(r.center_x, r.center_y)
+                centers.append((abs(ty - cy), int(getattr(r, "index", 0))))
+            centers.sort(key=lambda t: t[0])
+            return centers[0][1] if centers else None
+        except Exception:
+            return None
+
+    def _ensure_indicator_in(self, parent):
+        """Create (if needed) the drop line and ensure it lives under `parent`."""
+        ind = getattr(self, "_drag_indicator", None)
+        if ind is None:
+            ind = Widget(size_hint=(None, None), size=(1, 2))
+            with ind.canvas.after:  # draw ABOVE the rows
+                ind._color = Color(0.10, 0.70, 1.00, 0.0)  # hidden initially
+                ind._rect = Rectangle(size=(1, 2), pos=(0, 0))
+            self._drag_indicator = ind
+
+        if ind.parent is not parent:
+            with contextlib.suppress(Exception):
+                if ind.parent:
+                    ind.parent.remove_widget(ind)
+            parent.add_widget(ind)  # on top in this container
+        else:
+            # keep it on top if new rows appear
+            with contextlib.suppress(Exception):
+                parent.remove_widget(ind)
+                parent.add_widget(ind)
+        return ind
+
+    def _hide_indicator(self):
+        ind = getattr(self, "_drag_indicator", None)
+        if ind and hasattr(ind, "_color"):
+            ind._color.a = 0.0
+            ind.canvas.ask_update()
+
+    def _place_indicator_at_index(self, index: int):
+        """
+        Place the drop line at the TOP of the target row, inside the *row container*.
+        Uses local coordinates (target.y/target.height) so it can't drift.
+        """
+        rows = self._visible_rows()
+        if not rows:
+            return
+
+        # target row or last realized as fallback
+        target = next(
+            (r for r in rows if int(getattr(r, "index", -1)) == int(index)), rows[-1]
+        )
+        parent = target.parent
+        if not parent:
+            return
+
+        # LOCAL coords: row's top inside its parent
+        y_in_parent = target.y + target.height
+
+        try:
+            from kivy.metrics import dp
+
+            thickness = max(2, int(dp(2)))
+        except Exception:
+            thickness = 2
+
+        ind = self._ensure_indicator_in(parent)
+        ind.size = (parent.width, thickness)
+        ind.pos = (0, y_in_parent - 1)  # tweak -1/-2/+0 to taste
+
+        # Update primitive + show
+        ind._rect.size = ind.size
+        ind._rect.pos = ind.pos
+        ind._color.a = 0.95
+        ind.canvas.ask_update()
+
+    def _playlist_begin_drag(self, src_index: int):
+        """Begin a reorder gesture from src_index."""
+        try:
+            self._drag_src_index = src_index
+        except Exception:
+            self._drag_src_index = None
+        self._drag_target_index = self._drag_src_index
+        if self._drag_target_index is not None:
+            self._place_indicator_at_index(self._drag_target_index)
+
+    def _playlist_drag_to(self, touch):
+        """Update drop target while dragging."""
+        idx = self._index_at_touch(touch)
+        if idx is None:
+            self._hide_indicator()
+            return
+        self._drag_target_index = int(idx)
+        self._place_indicator_at_index(self._drag_target_index)
+
+    def _playlist_end_drag(self, touch):
+        """Commit the move and refresh UI + service."""
+        try:
+            apm = getattr(self, "_playlist_manager", None)
+            ap = apm.active_playlist() if apm else None
+            if not ap or self._drag_src_index is None:
+                self._hide_indicator()
+                self._drag_src_index = None
+                self._drag_target_index = None
+                return
+
+            dst = (
+                self._drag_target_index
+                if self._drag_target_index is not None
+                else self._index_at_touch(touch)
+            )
+            if dst is None:
+                self._hide_indicator()
+                self._drag_src_index = None
+                self._drag_target_index = None
+                return
+
+            src_index = int(self._drag_src_index)
+            dst_index = int(dst)
+            if dst_index != src_index:
+                with contextlib.suppress(Exception):
+                    apm.move_track(ap.id, src_index, dst_index)
+                with contextlib.suppress(Exception):
+                    self._playlist_refresh_tracks()
+                with contextlib.suppress(Exception):
+                    self._send_active_playlist_to_service()
+        finally:
+            self._hide_indicator()
+            self._drag_src_index = None
+            self._drag_target_index = None
 
     def _start_music_service_user_initiated(self):
         if utils.get_platform() != "android":
@@ -396,9 +743,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         except Exception:
             storage = os.path.join(os.getcwd(), "playlists.json")
         self._playlist_manager = PlaylistManager(storage_path=storage)
-        wire_public_export(
-            self._playlist_manager, self.store, subdir="Documents/YouTube Music Player"
-        )
         self.refresh_playlist()
 
     def _playlist_refresh_sidebar(self):
@@ -1399,48 +1743,6 @@ class Musicapp(MDApp):
     def spx(self, value: float) -> float:
         """Scaled sp() you can call from KV: app.spx(14) etc."""
         return sp(value) * float(self.ui_scale)
-
-    def on_start(self):
-        if utils.get_platform() != "android":
-            return
-
-        def _progress(done, total, name):
-            with contextlib.suppress(Exception):
-                pct = int((done / total) * 100)
-                print(f"[recovery] {done}/{total} • {pct}% • {name}")
-                toast(f"Restoring {done}/{total}")
-
-        def _done(summary):
-            print("[recovery] done:", summary)
-            with contextlib.suppress(Exception):
-                self._playlist_manager = PlaylistManager()
-                try_restore_playlists(
-                    self._store,
-                    self._playlist_manager,
-                    subdir="Documents/YouTube Music Player",
-                )
-                self._playlist_manager.save()
-                if getattr(self, "root", None) and hasattr(
-                    self.root, "refresh_playlist"
-                ):
-                    self.root.refresh_playlist()
-                toast(f"Recovered {summary.get('copied', 0)}/{summary.get('found', 0)}")
-
-        started = start_mediastore_recovery_background(
-            self._store,
-            relative_path_prefix="Music/YouTube Music Player/",
-            dest_subdir="Downloaded/Played",
-            overwrite=False,
-            request_permission=True,
-            extract_covers=True,
-            max_workers=2,
-            max_items=None,
-            on_progress=_progress,
-            on_done=_done,
-            once_store_key="media_recovery_done",
-            force=False,
-        )
-        print("[recovery] started:", started)
 
     def get_thumb_path(self, title: str) -> str:
         """Return a valid local path for a track thumbnail, or the default cover."""

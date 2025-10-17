@@ -2,6 +2,10 @@
 #:import MDFillRoundFlatIconButton kivymd.uix.button.MDFillRoundFlatIconButton
 #:import MDBottomNavigationItem kivymd.uix.bottomnavigation.MDBottomNavigationItem
 
+<ScaledLabelLibrary@MDLabel>:
+    # default body size; override per-usage where needed
+    font_size: app.spx(14)
+
 <PlaylistItem@BoxLayout>:
     pid: ""
     name: ""
@@ -41,36 +45,31 @@
         shorten_from: "right"
         text_size: (self.width - dp(12), None)
 
-    # RIGHT: reserved area for badge + controls
-    BoxLayout:
-        orientation: "horizontal"
+<PlaylistTrackRow>:
+    # Data keys: text (str), index (int)
+    orientation: "horizontal"
+    size_hint_y: None
+    height: dp(56)
+    padding: dp(12), 0
+    spacing: dp(10)
+
+    # Title (left, stretches)
+    MDLabel:
+        text: root.text
+        halign: "left"
+        shorten: True
+        shorten_from: "right"
+        pos_hint: {"center_y": 0.5}
+        size_hint_x: 1
+
+    MDIconButton:
+        id: delete_btn
+        icon: "delete-outline"
         size_hint_x: None
-        width: dp(148)
-        spacing: dp(6)
+        width: dp(48)
+        pos_hint: {"center_y": 0.5}
+        on_release: app.root._playlist_remove_track(root.index)
 
-        MDLabel:
-            text: "Missing"
-            theme_text_color: "Error"
-            opacity: 1 if root.missing else 0
-            size_hint_x: None
-            width: self.texture_size[0] if root.missing else 0
-            valign: "middle"
-
-        MDIconButton:
-            icon: "arrow-up"
-            tooltip_text: "Move up"
-            on_release: app.root._playlist_move_up(root.index)
-            disabled: root.index == 0
-
-        MDIconButton:
-            icon: "arrow-down"
-            tooltip_text: "Move down"
-            on_release: app.root._playlist_move_down(root.index)
-            disabled: app.root._is_last_index(root.index)
-
-        MDIconButton:
-            icon: "delete"
-            on_release: app.root._playlist_remove_track(root.index)
 
 <LibraryTab@MDBottomNavigationItem>:
     # These ids are accessed from Python via self.library_tab.ids[...]
@@ -99,6 +98,7 @@
                     MDLabel:
                         text: "Playlists"
                         bold: True
+                        font_size: app.spx(14)
                     MDFillRoundFlatIconButton:
                         size_hint_y: 0.7
                         size_hint_x: 0.2
@@ -134,19 +134,22 @@
                         id: active_playlist_name
                         text: "Tracks"
                         bold: True
+                        font_size: app.spx(14)
                     MDFillRoundFlatIconButton:
                         size_hint_y: 0.7
                         size_hint_x: 0.2
                         text: "Import"
                         icon: "file-plus"
                         on_release: app.root._playlist_import_selective()
+
                 RecycleView:
                     id: rv_tracks
-                    viewclass: "TrackItem"
-                    data: []
+                    viewclass: "PlaylistTrackRow"
+                    scroll_type: ['bars', 'content']
+                    bar_width: dp(6)
                     RecycleBoxLayout:
-                        default_size: None, dp(56)
+                        default_size: None, dp(44)
                         default_size_hint: 1, None
                         size_hint_y: None
                         height: self.minimum_height
-                        orientation: "vertical"
+                        orientation: 'vertical'
