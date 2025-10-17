@@ -34,7 +34,7 @@ from kivy.uix.widget import Widget
 kivy_home = get_app_writable_dir("Downloaded")
 os.makedirs(kivy_home, exist_ok=True)
 os.environ["KIVY_HOME"] = kivy_home
-# os.environ["KIVY_NO_CONSOLELOG"] = "1"
+os.environ["KIVY_NO_CONSOLELOG"] = "1"
 
 from threading import Thread
 
@@ -1166,7 +1166,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                     ),
                 ),
                 MDFlatButton(
-                    text="Yes", on_release=lambda *_: self.remove_track(message)
+                    text="Yes", on_release=lambda *_: self.remove_track(message) or self._current_dialog.dismiss(),
                 ),
             ],
         )
@@ -1174,63 +1174,61 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def remove_track(self, message):
         """
-        Deletes the selected track's media/cover from disk AND removes it
-        from the active playlist JSON so UI and data stay in sync.
+        Delete media/cover on disk and remove the item from the active playlist.
+        Works whether `message` is a filename string (Page 2) or a dict with
+        'path'/ 'cover_path' (Page 3).
         """
         try:
             track_path = getattr(self, "selected_track_path", None)
             cover_path = getattr(self, "selected_cover_path", None)
 
+            if not track_path and isinstance(message, dict):
+                track_path = message.get("path")
+                cover_path = message.get("cover_path")
+
             if not track_path and isinstance(message, str):
-                import os
                 base = os.path.splitext(os.path.basename(message))[0]
                 folder = get_app_writable_dir("Downloaded/Played")
                 track_path = os.path.join(folder, f"{base}.m4a")
                 cover_path = os.path.join(folder, f"{base}.jpg")
 
-            if not track_path and isinstance(message, dict):
-                track_path = message.get("path")
-                cover_path = message.get("cover_path")
-
             if not track_path:
                 toast("No track selected.")
                 return
 
-            import os
             for p in (track_path, cover_path):
                 if p and os.path.exists(p):
-                    try:
+                    with contextlib.suppress(Exception):
                         os.remove(p)
-                    except Exception as e:
-                        print(f"Warning: could not delete {p}: {e}")
 
             pm = getattr(self, "_playlist_manager", None)
             ap = pm.active_playlist() if pm else None
             if ap:
-                norm_target = os.path.normpath(os.path.realpath(track_path))
+                target = os.path.normpath(os.path.realpath(track_path))
                 remove_index = None
-                try:
-                    tracks = pm.get_tracks(ap.id)
-                except Exception:
-                    tracks = []
-                for idx, item in enumerate(tracks):
-                    p = item.get("path") if isinstance(item, dict) else getattr(item, "path", None)
+                for idx, t in enumerate(list(ap.tracks) if ap.tracks else []):
+                    p = getattr(t, "path", None) or (t.get("path") if isinstance(t, dict) else None)
                     if not p:
                         continue
-                    np = os.path.normpath(os.path.realpath(p))
-                    if np == norm_target or os.path.basename(np) == os.path.basename(norm_target):
+                    rp = os.path.normpath(os.path.realpath(p))
+                    if rp == target or os.path.basename(rp) == os.path.basename(target):
                         remove_index = idx
                         break
                 if remove_index is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         pm.remove_track(ap.id, remove_index)
-                    except Exception as e:
-                        print(f"Warning: playlist removal failed: {e}")
 
             with contextlib.suppress(Exception):
                 self._playlist_refresh_tracks()
+                self.library_tab.ids.rv_tracks.refresh_from_data()
+
             with contextlib.suppress(Exception):
                 self.second_screen2()
+                self.ids.rv.refresh_from_data()
+
+            if dlg := getattr(self, "dialog", None):
+                with contextlib.suppress(Exception):
+                    dlg.dismiss()
 
             toast("Track deleted and removed from playlist.")
         except Exception as e:
