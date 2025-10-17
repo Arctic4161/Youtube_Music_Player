@@ -45,7 +45,7 @@ def request_audio_focus_plain(ctx):
 
     afr = (AFRBuilder(AudioManager.AUDIOFOCUS_GAIN)
            .setAudioAttributes(attrs)
-           .build())           # no listener → no SIGSEGV
+           .build())
 
     am = cast('android.media.AudioManager', ctx.getSystemService(ctx.AUDIO_SERVICE))
     ok = False
@@ -56,6 +56,7 @@ def request_audio_focus_plain(ctx):
     except Exception:
         ok = True
     return ok
+
 
 def abandon_audio_focus(ctx):
     """Give focus back when paused/stopped."""
@@ -152,10 +153,10 @@ def release_wakelock():
 
 
 def embed_cover_art_m4a_jpeg(
-    m4a_path: str,
-    jpeg_bytes: bytes,
-    title: str | None = None,
-    artist: str | None = None,
+        m4a_path: str,
+        jpeg_bytes: bytes,
+        title: str | None = None,
+        artist: str | None = None,
 ) -> bool:
     try:
         audio = MP4(m4a_path)
@@ -169,6 +170,24 @@ def embed_cover_art_m4a_jpeg(
     except Exception as e:
         print(f"[service] embed cover failed: {e}")
         return False
+
+
+def _resolve_cover_for_audio(audio_path: str) -> str | None:
+    """
+    Given /path/to/Foo.m4a try to return a working cover path:
+    - <sandbox>/Downloaded/Played/Foo.jpg
+    - <old_dir>/Foo.jpg    (if still present)
+    """
+    import os
+    from utils import get_app_writable_dir
+
+    name, _ = os.path.splitext(os.path.basename(audio_path))
+    cand = os.path.join(get_app_writable_dir("Downloaded/Played"), f"{name}.jpg")
+    if os.path.exists(cand):
+        return cand
+
+    old = os.path.join(os.path.dirname(audio_path), f"{name}.jpg")
+    return old if os.path.exists(old) else None
 
 
 class CustomLogger:
@@ -194,7 +213,7 @@ class Gui_sounds:
     set_local = None
     load_from_service = False
     set_local_download = get_app_writable_dir("Downloaded/Played")
-    cache_dire = os.path.join(os.getcwd(), "Downloaded")
+    cache_dire = get_app_writable_dir("Downloaded")
     os.makedirs(cache_dire, exist_ok=True)
     shuffle_selected = False
     playlist = []
@@ -245,9 +264,9 @@ class Gui_sounds:
         while not self._next_thread_stop.is_set():
             try:
                 if (
-                    Gui_sounds.sound is not None
-                    and (Gui_sounds.paused is False or Gui_sounds.sound.state == "play")
-                    and Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1
+                        Gui_sounds.sound is not None
+                        and (Gui_sounds.paused is False or Gui_sounds.sound.state == "play")
+                        and Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1
                 ):
                     if Gui_sounds.previous is True or Gui_sounds.sound.loop is True:
                         continue
@@ -266,16 +285,38 @@ class Gui_sounds:
 
     @staticmethod
     def load(*val):
+        """
+        Load a track robustly:
+        - Rebuild absolute path from the current app sandbox ("Downloaded/Played")
+          so stale absolute paths from older installs still work.
+        - Fall back to the originally provided path if needed.
+        - Keep existing GUI and length setup.
+        """
+
         GS.stop()
         Gui_sounds.file_to_load = "".join(val)
         Gui_sounds.file_to_load = os.path.normpath(Gui_sounds.file_to_load)
-        if not os.path.isfile(Gui_sounds.file_to_load):
+        base_dir = Gui_sounds.set_local_download
+        candidate = os.path.join(base_dir, os.path.basename(Gui_sounds.file_to_load))
+
+        path_to_try = candidate if os.path.isfile(candidate) else Gui_sounds.file_to_load
+
+        if not os.path.isfile(path_to_try):
+            name, ext = os.path.splitext(os.path.basename(path_to_try))
+            if not ext:
+                for e in (".m4a", ".mp3", ".aac", ".flac", ".ogg", ".wav"):
+                    p2 = os.path.join(base_dir, name + e)
+                    if os.path.isfile(p2):
+                        path_to_try = p2
+                        break
+
+        if not os.path.isfile(path_to_try):
             with contextlib.suppress(Exception):
-                Gui_sounds.send(
-                    "song_not_found", os.path.basename(Gui_sounds.file_to_load)
-                )
+                Gui_sounds.send("song_not_found", os.path.basename(Gui_sounds.file_to_load))
             Gui_sounds.send("reset_gui", "reset_gui")
             return
+
+        Gui_sounds.file_to_load = path_to_try
         Gui_sounds.sound = SoundLoader.load(Gui_sounds.file_to_load)
         if not Gui_sounds.sound:
             Gui_sounds.send("reset_gui", "reset_gui")
@@ -286,7 +327,12 @@ class Gui_sounds:
         Gui_sounds.length = Gui_sounds.sound.length or 0
         Gui_sounds.send("set_slider", str(Gui_sounds.length))
         if Gui_sounds.load_from_service:
-            Gui_sounds.send("update_image", Gui_sounds.set_local)
+            try:
+                cover = _resolve_cover_for_audio(Gui_sounds.file_to_load)
+                if cover:
+                    Gui_sounds.send("update_image", cover)
+            except Exception:
+                pass
         GS.play()
 
     def download_yt(self, *val):
@@ -298,19 +344,14 @@ class Gui_sounds:
             Gui_sounds.send("error_reset", f"bad args: {e}")
             return
 
+        os.makedirs(set_local_download, exist_ok=True)
         safe_title = utils.safe_filename(settitle)
-        out_dir = (
-            get_app_writable_dir("Downloaded/Played")
-            if utils.get_platform() == "android"
-            else set_local_download
-        )
-        os.makedirs(out_dir, exist_ok=True)
 
-        audio_path = os.path.join(out_dir, f"{safe_title}.m4a")
-        cover_path = os.path.join(out_dir, f"{safe_title}.jpg")
+        audio_path = os.path.join(set_local_download, f"{safe_title}.m4a")
+        cover_path = os.path.join(set_local_download, f"{safe_title}.jpg")
 
         ydl_opts = {
-            "outtmpl": {"default": os.path.join(out_dir, f"{safe_title}.%(ext)s")},
+            "outtmpl": {"default": audio_path},
             "proxies": {"all": "socks5://154.38.180.176:443"},
             "overwrites": True,
             "format": "m4a/bestaudio",
@@ -318,7 +359,6 @@ class Gui_sounds:
             "cachedir": Gui_sounds.cache_dire,
             "retries": 20,
             "restrictfilenames": True,
-            "writelog": os.path.join(Gui_sounds.cache_dire, "yt_download.log"),
             "forceipv4": True,
             "nocheckcertificate": True,
             "logger": CustomLogger(),
@@ -507,7 +547,7 @@ class Gui_sounds:
     def check_song_change(arg0):
         Gui_sounds.song_change = arg0
         if Gui_sounds.song_change is True and (
-            Gui_sounds.sound is not None and Gui_sounds.sound.state == "play"
+                Gui_sounds.sound is not None and Gui_sounds.sound.state == "play"
         ):
             GS.stop()
         Gui_sounds.retrieving_song()
@@ -530,9 +570,9 @@ class Gui_sounds:
                         current = None
 
                     need_rebuild = (
-                        (not Gui_sounds.shuffle_bag)
-                        or (Gui_sounds._bag_source_len != len(songs))
-                        or any(item not in songs for item in Gui_sounds.shuffle_bag)
+                            (not Gui_sounds.shuffle_bag)
+                            or (Gui_sounds._bag_source_len != len(songs))
+                            or any(item not in songs for item in Gui_sounds.shuffle_bag)
                     )
                     if need_rebuild:
                         Gui_sounds._rebuild_shuffle_bag(
@@ -675,7 +715,6 @@ class Gui_sounds:
 
 
 GS = Gui_sounds()
-
 
 if __name__ == "__main__":
     if utils.get_platform() == "android":

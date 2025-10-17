@@ -1,4 +1,4 @@
-
+#:import Window kivy.core.window.Window
 #:import MDFillRoundFlatIconButton kivymd.uix.button.MDFillRoundFlatIconButton
 #:import MDBottomNavigationItem kivymd.uix.bottomnavigation.MDBottomNavigationItem
 
@@ -20,10 +20,11 @@
         on_release: app.root._playlist_on_select(root.pid)
     MDIconButton:
         icon: "dots-vertical"
+        size_hint: None, None
+        width: dp(36) if Window.width < dp(520) else dp(40)
+        height: self.width
+        icon_size: dp(18) if Window.width < dp(520) else dp(20)
         on_release: app.root._playlist_open_menu(root.pid, root.name)
-        shorten: True
-        shorten_from: "right"
-        text_size: (self.width - dp(12), None)
 
 <TrackItem@BoxLayout>:
     text: ""
@@ -98,19 +99,23 @@
                     MDLabel:
                         text: "Playlists"
                         bold: True
-                        font_size: app.spx(14)
+                        font_size: app.spx(12)
                     MDFillRoundFlatIconButton:
-                        size_hint_y: 0.7
-                        size_hint_x: 0.2
                         text: "New"
                         icon: "plus"
+                        size_hint: None, None
+                        adaptive_width: True
+                        height: dp(34) if Window.width < dp(380) else (dp(38) if Window.width < dp(520) else dp(42))
+                        icon_size: dp(16) if Window.width < dp(520) else dp(18)
+                        font_size: sp(13) if Window.width < dp(520) else sp(15)
+                        padding: [dp(12), 0] if Window.width < dp(520) else [dp(14), 0]
                         on_release: app.root._playlist_prompt_new()
                 RecycleView:
                     id: rv_playlists
                     viewclass: "PlaylistItem"
                     data: []
                     RecycleBoxLayout:
-                        default_size: None, dp(48)
+                        default_size: None, dp(44) if Window.width < dp(520) else dp(52)
                         default_size_hint: 1, None
                         size_hint_y: None
                         height: self.minimum_height
@@ -134,21 +139,25 @@
                         id: active_playlist_name
                         text: "Tracks"
                         bold: True
-                        font_size: app.spx(14)
+                        font_size: app.spx(12)
                     MDFillRoundFlatIconButton:
-                        size_hint_y: 0.7
-                        size_hint_x: 0.2
                         text: "Import"
                         icon: "file-plus"
+                        size_hint: None, None
+                        adaptive_width: True
+                        height: dp(34) if Window.width < dp(380) else (dp(38) if Window.width < dp(520) else dp(42))
+                        icon_size: dp(16) if Window.width < dp(520) else dp(18)
+                        font_size: sp(13) if Window.width < dp(520) else sp(15)
+                        padding: [dp(12), 0] if Window.width < dp(520) else [dp(14), 0]
                         on_release: app.root._playlist_import_selective()
 
                 RecycleView:
                     id: rv_tracks
                     viewclass: "PlaylistTrackRow"
                     scroll_type: ['bars', 'content']
-                    bar_width: dp(6)
+                    bar_width: dp(4) if Window.width < dp(520) else dp(6)
                     RecycleBoxLayout:
-                        default_size: None, dp(44)
+                        default_size: None, dp(44) if Window.width < dp(520) else dp(52)
                         default_size_hint: 1, None
                         size_hint_y: None
                         height: self.minimum_height

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import uuid
@@ -71,6 +72,13 @@ class PlaylistManager:
         self.create_and_save_playlist(playlists, raw)
 
     def load(self) -> None:
+        """
+        Load playlists and rebuild absolute media/cover paths from the current
+        app sandbox ('Downloaded/Played') if stored paths are relative.
+        """
+        import os
+        root = get_app_writable_dir("Downloaded/Played")
+
         if os.path.exists(self.storage_path):
             try:
                 with open(self.storage_path, "r", encoding="utf-8") as f:
@@ -82,18 +90,42 @@ class PlaylistManager:
 
         playlists: List[Playlist] = []
         for p in raw.get("playlists", []):
-            tr = [
-                Track(
-                    title=t.get(
-                        "title",
-                        os.path.splitext(os.path.basename(t.get("path", "")))[0],
-                    ),
-                    path=t.get("path", ""),
-                    duration=t.get("duration", 0.0),
-                    thumb=t.get("thumb"),
-                )
-                for t in p.get("tracks", [])
-            ]
+            tr = []
+            for t in p.get("tracks", []):
+                raw_path = t.get("path", "") or ""
+                if raw_path and not os.path.isabs(raw_path):
+                    raw_path = os.path.normpath(os.path.join(root, raw_path))
+
+                if raw_path and not os.path.exists(raw_path):
+                    alt = os.path.join(root, os.path.basename(raw_path))
+                    if os.path.exists(alt):
+                        raw_path = os.path.normpath(alt)
+
+                name = t.get("title") or os.path.splitext(os.path.basename(raw_path))[0]
+                if (os.sep in name) or name.lower().endswith(
+                        (".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg")
+                ):
+                    name = os.path.splitext(os.path.basename(name))[0]
+
+                dur = t.get("duration", 0.0)
+
+                thumb = t.get("thumb")
+                if thumb and not os.path.isabs(thumb):
+                    thumb_abs = os.path.normpath(os.path.join(root, thumb))
+                    thumb = thumb_abs if os.path.exists(thumb_abs) else thumb
+
+                if (not thumb) and raw_path:
+                    base, _ = os.path.splitext(raw_path)
+                    cand = f"{base}.jpg"
+                    if os.path.exists(cand):
+                        thumb = cand
+                    else:
+                        cand2 = os.path.join(root, f"{os.path.basename(base)}.jpg")
+                        if os.path.exists(cand2):
+                            thumb = cand2
+
+                tr.append(Track(title=name, path=raw_path, duration=dur, thumb=thumb))
+
             pl = Playlist(
                 id=p.get("id", str(uuid.uuid4())),
                 name=p.get("name", "Untitled"),
@@ -113,17 +145,39 @@ class PlaylistManager:
             self.save()
 
     def save(self) -> None:
+        """
+        Save playlists with media/cover paths stored as RELATIVE paths
+        (when they live under the current sandbox), so they remain valid
+        across reinstalls/updates that change the sandbox root.
+        """
+        import os
+        root = get_app_writable_dir("Downloaded/Played")
+        root_norm = os.path.normcase(os.path.normpath(root))
+
+        def _to_rel(pth: Optional[str]) -> Optional[str]:
+            if not pth:
+                return pth
+            try:
+                np = os.path.normpath(pth)
+                if os.path.normcase(np).startswith(root_norm + os.sep) or os.path.normcase(np) == root_norm:
+                    return os.path.relpath(np, root)
+                return pth
+            except Exception:
+                return pth
+
         serial = {
-            "playlists": [
-                {
-                    "id": p.id,
-                    "name": p.name,
-                    "tracks": [asdict(t) for t in p.tracks],
-                }
-                for p in self.data["playlists"]
-            ],
+            "playlists": [],
             "active_playlist_id": self.data["active_playlist_id"],
         }
+        for p in self.data["playlists"]:
+            tracks = []
+            for t in p.tracks:
+                td = asdict(t)
+                td["path"] = _to_rel(td.get("path"))
+                td["thumb"] = _to_rel(td.get("thumb"))
+                tracks.append(td)
+            serial["playlists"].append({"id": p.id, "name": p.name, "tracks": tracks})
+
         tmp = f"{self.storage_path}.tmp"
         os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as f:
@@ -172,13 +226,20 @@ class PlaylistManager:
         self.save()
 
     def add_tracks(self, pid: str, paths: List[str]) -> None:
-        """Add tracks by filesystem path, **skipping duplicates by normalized path**.
-        A duplicate is any path that, after os.path.normpath + normcase, already exists in the playlist.
-        Also skips duplicates within the same import batch.
+        """
+        Add tracks by filesystem path, storing RELATIVE paths for anything under
+        the app sandbox so the JSON survives reinstalls / sandbox changes.
+        Also skips duplicates by normalized path and within the import batch.
         """
         p = self._find(pid)
         if not p:
             return
+
+        import os
+        from utils import safe_filename, get_app_writable_dir
+
+        root = get_app_writable_dir("Downloaded/Played")
+        root_norm = os.path.normcase(os.path.normpath(root))
 
         def _norm(pth: str) -> str:
             try:
@@ -186,22 +247,48 @@ class PlaylistManager:
             except Exception:
                 return pth
 
-        existing = {
-            _norm(getattr(t, "path", "")) for t in p.tracks if getattr(t, "path", "")
-        }
+        def _to_rel_if_in_sandbox(pth: str) -> str:
+            try:
+                np = os.path.normpath(pth)
+                np_norm = os.path.normcase(np)
+                if np_norm == root_norm or np_norm.startswith(root_norm + os.sep):
+                    return os.path.relpath(np, root)
+                return pth
+            except Exception:
+                return pth
+
+        existing = {_norm(getattr(t, "path", "")) for t in p.tracks if getattr(t, "path", "")}
         seen_batch = set()
         added_any = False
+
         for path in paths or []:
             if not path:
                 continue
+
+            base_name = os.path.basename(path)
+            name_wo_ext, ext = os.path.splitext(base_name)
+
+            safe_name = safe_filename(name_wo_ext)
+            title = safe_name
+
             npath = _norm(path)
             if not npath or npath in existing or npath in seen_batch:
                 continue
-            title = os.path.splitext(os.path.basename(path))[0]
-            p.tracks.append(Track(title=title, path=path))
+
+            rel_or_abs = _to_rel_if_in_sandbox(path)
+
+            thumb = None
+            with contextlib.suppress(Exception):
+                base, _ = os.path.splitext(path)
+                cand = f"{base}.jpg"
+                if os.path.exists(cand):
+                    thumb = _to_rel_if_in_sandbox(cand)
+
+            p.tracks.append(Track(title=title, path=rel_or_abs, thumb=thumb))
             existing.add(npath)
             seen_batch.add(npath)
             added_any = True
+
         if added_any:
             self.save()
 

@@ -20,7 +20,13 @@ else:
             Permission.POST_NOTIFICATIONS,
         ]
     )
-
+from kivy.config import Config
+if utils.get_platform() == 'android':
+    Config.set('input', 'mouse', '')
+    Config.set('input', 'mtdev', '')
+    Config.set('input', 'hid_input', '')
+else:
+    Config.set('input', 'mouse', 'mouse,disable_multitouch')
 from kivy.graphics import Color, Rectangle
 from kivy.storage.jsonstore import JsonStore
 from kivy.uix.widget import Widget
@@ -78,15 +84,11 @@ class RecycleViewRow(BoxLayout):
 class PlaylistTrackRow(MDBoxLayout):
     text = StringProperty("")
     index = NumericProperty(0)
-
     _dragging = False
     _down_pos = (0, 0)
     _moved = False
-    # --- Long-press config (desktop friendly) ---
-    LONG_PRESS_S = 0.35  # seconds before drag can start
-    MOVE_CANCEL_PX = dp(8)  # small jitter allowance
-
-    # internal state
+    LONG_PRESS_S = 0.35
+    MOVE_CANCEL_PX = dp(12)
     _lp_ev = None
     _longpress_fired = False
     _pending_touch = None
@@ -114,7 +116,6 @@ class PlaylistTrackRow(MDBoxLayout):
         t = self._pending_touch
         if t is None:
             return
-        # snap anchor to current pointer so the first drag frame is aligned
         self._down_pos = t.pos
 
         self._longpress_fired = True
@@ -141,13 +142,11 @@ class PlaylistTrackRow(MDBoxLayout):
             print("[drag] _playlist_begin_drag/_drag_to error:", e)
 
     def on_touch_down(self, touch):
-        # Desktop: only left mouse button initiates interactions
         if hasattr(touch, "button") and touch.button != "left":
             return super().on_touch_down(touch)
         if not self.collide_point(*touch.pos):
             return super().on_touch_down(touch)
 
-        # Let delete button handle itself
         d = self.ids.get("delete_btn")
         if d:
             try:
@@ -159,7 +158,6 @@ class PlaylistTrackRow(MDBoxLayout):
             except Exception:
                 pass
 
-        # Prepare long-press
         self._dragging = False
         self._moved = False
         self._down_pos = touch.pos
@@ -173,8 +171,6 @@ class PlaylistTrackRow(MDBoxLayout):
         self._lp_ev = Clock.schedule_once(
             self._fire_longpress, float(self.LONG_PRESS_S)
         )
-
-        # Consume the gesture so short click logic stays here
         return True
 
     def on_touch_move(self, touch):
@@ -186,7 +182,6 @@ class PlaylistTrackRow(MDBoxLayout):
         moved_far = (dx * dx + dy * dy) ** 0.5 > float(self.MOVE_CANCEL_PX)
         self._moved = self._moved or moved_far
 
-        # If hold time already elapsed, begin drag on first move (robust on Windows)
         if (
             (not self._dragging)
             and (not self._longpress_fired)
@@ -200,7 +195,6 @@ class PlaylistTrackRow(MDBoxLayout):
             self._maybe_start_drag(touch)
             return True
 
-        # Cancel timer if user moved a lot before long-press
         if not self._longpress_fired and moved_far:
             self._cancel_longpress()
 
@@ -227,18 +221,15 @@ class PlaylistTrackRow(MDBoxLayout):
                 return True
             return True
 
-        # Short click plays (unless it's over the delete button)
+
         if self.collide_point(*touch.pos) and not self._moved:
-            d = self.ids.get("delete_btn")
-            if d:
-                try:
+            if d := self.ids.get("delete_btn"):
+                with contextlib.suppress(Exception):
                     x1, y1 = d.to_window(0, 0)
                     x2, y2 = x1 + d.width, y1 + d.height
                     tx, ty = touch.pos
                     if x1 <= tx <= x2 and y1 <= ty <= y2:
                         return True
-                except Exception:
-                    pass
             with contextlib.suppress(Exception):
                 MDApp.get_running_app().root._playlist_play_index(self.index)
             return True
@@ -308,8 +299,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             return None, None, None
 
         lm = getattr(rv, "layout_manager", None)
-
-        # KivyMD sometimes exposes view_port; otherwise the first child is the internal container
         container = getattr(lm, "view_port", None)
         if container is None:
             container = rv.children[0] if rv.children else None
@@ -321,9 +310,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         rv, container, lm = self._rv_container()
         if not rv or not container:
             return []
-
-        # Prefer layout_manager.children when present; else container.children
-        rows = []
         return (
             [w for w in lm.children if hasattr(w, "index")]
             if lm is not None and hasattr(lm, "children")
@@ -336,16 +322,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if not rows:
             return None
         tx, ty = touch.pos
-        # Find the row whose vertical span contains the touch, using window coords
         for r in rows:
-            try:
+            with contextlib.suppress(Exception):
                 x1, y1 = r.to_window(0, 0)
                 x2, y2 = x1 + r.width, y1 + r.height
                 if y1 <= ty <= y2:
                     return int(getattr(r, "index", 0))
-            except Exception:
-                pass
-        # If between rows or above/below, clamp to nearest visible index
         try:
             centers = []
             for r in rows:
@@ -361,8 +343,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         ind = getattr(self, "_drag_indicator", None)
         if ind is None:
             ind = Widget(size_hint=(None, None), size=(1, 2))
-            with ind.canvas.after:  # draw ABOVE the rows
-                ind._color = Color(0.10, 0.70, 1.00, 0.0)  # hidden initially
+            with ind.canvas.after:
+                ind._color = Color(0.10, 0.70, 1.00, 0.0)
                 ind._rect = Rectangle(size=(1, 2), pos=(0, 0))
             self._drag_indicator = ind
 
@@ -370,9 +352,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             with contextlib.suppress(Exception):
                 if ind.parent:
                     ind.parent.remove_widget(ind)
-            parent.add_widget(ind)  # on top in this container
+            parent.add_widget(ind)
         else:
-            # keep it on top if new rows appear
             with contextlib.suppress(Exception):
                 parent.remove_widget(ind)
                 parent.add_widget(ind)
@@ -384,38 +365,30 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             ind._color.a = 0.0
             ind.canvas.ask_update()
 
-    def _place_indicator_at_index(self, index: int):
-        """
-        Place the drop line at the TOP of the target row, inside the *row container*.
-        Uses local coordinates (target.y/target.height) so it can't drift.
-        """
+    def _place_indicator_at_index(self, index: int, touch_y: float = None):
+        """Place the blue indicator close to the cursor instead of row top."""
         rows = self._visible_rows()
         if not rows:
             return
 
-        # target row or last realized as fallback
-        target = next(
-            (r for r in rows if int(getattr(r, "index", -1)) == int(index)), rows[-1]
-        )
+        target = next((r for r in rows if int(getattr(r, "index", -1)) == int(index)), rows[-1])
         parent = target.parent
         if not parent:
             return
 
-        # LOCAL coords: row's top inside its parent
-        y_in_parent = target.y + target.height
+        from kivy.metrics import dp
 
-        try:
-            from kivy.metrics import dp
-
-            thickness = max(2, int(dp(2)))
-        except Exception:
-            thickness = 2
-
+        thickness = max(2, int(dp(2)))
         ind = self._ensure_indicator_in(parent)
-        ind.size = (parent.width, thickness)
-        ind.pos = (0, y_in_parent - 1)  # tweak -1/-2/+0 to taste
+        ind.size = (target.width, thickness)
 
-        # Update primitive + show
+        if touch_y is not None:
+            local_y = parent.to_widget(0, touch_y)[1]
+            local_y = max(0, min(parent.height - thickness, local_y))
+            ind.pos = (target.x, local_y - thickness / 2)
+        else:
+            ind.pos = (target.x, target.y + target.height - thickness / 2)
+
         ind._rect.size = ind.size
         ind._rect.pos = ind.pos
         ind._color.a = 0.95
@@ -432,13 +405,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self._place_indicator_at_index(self._drag_target_index)
 
     def _playlist_drag_to(self, touch):
-        """Update drop target while dragging."""
         idx = self._index_at_touch(touch)
         if idx is None:
             self._hide_indicator()
             return
         self._drag_target_index = int(idx)
-        self._place_indicator_at_index(self._drag_target_index)
+        self._place_indicator_at_index(self._drag_target_index, touch_y=touch.y)
 
     def _playlist_end_drag(self, touch):
         """Commit the move and refresh UI + service."""
@@ -528,17 +500,16 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         Clock.schedule_once(_do, 0)
 
     def check_are_we_playing(self, *val):
-        GUILayout.check_are_play = "".join(val)
+        GUILayout.check_are_paused = "".join(val)
 
     def set_gui_from_check(self, dt):
-        if GUILayout.check_are_play == "False":
+        if GUILayout.check_are_paused == "False":
             self.set_gui_conditions(0, True, False, 1)
-            GUILayout.gui_resume_check.cancel()
-        elif GUILayout.check_are_play == "None":
+        elif GUILayout.check_are_paused == "None":
             self.set_gui_conditions_from_none()
-        elif GUILayout.check_are_play == "True":
+        elif GUILayout.check_are_paused == "True":
             self.set_gui_conditions(1, False, True, 0)
-            GUILayout.gui_resume_check.cancel()
+
 
     @mainthread
     def _reset_to_startup_gui(self):
@@ -583,9 +554,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             MDApp.get_running_app().root.ids.next_btt.opacity = 0
             MDApp.get_running_app().root.ids.next_btt.disabled = True
             MDApp.get_running_app().root.ids.previous_btt.disabled = True
+            MDApp.get_running_app().root.ids.song_position.opacity = 0
+            MDApp.get_running_app().root.ids.song_max.opacity = 0
         self._reset_to_startup_gui()
-        with contextlib.suppress(Exception):
-            GUILayout.gui_resume_check.cancel()
 
     def set_gui_conditions(self, arg0, arg1, arg2, arg3):
         MDApp.get_running_app().root.ids.play_btt.opacity = arg0
@@ -629,8 +600,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def set_next_previous_bttns(self):
         self.paused = False
         GUILayout.playing_song = True
-        with contextlib.suppress(Exception):
-            GUILayout.get_update_slider.cancel()
         GUILayout.get_update_slider = Clock.schedule_interval(
             GUILayout.wait_update_slider, 1
         )
@@ -1135,15 +1104,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             port=3002,
             default=True,
         )
-        if not hasattr(self, "check_are_we_playing") or not callable(
-            getattr(self, "check_are_we_playing", None)
-        ):
-
-            def _fallback_are_we(*val):
-                with contextlib.suppress(Exception):
-                    GUILayout.check_are_play = "".join(val)
-
-            self.check_are_we_playing = _fallback_are_we
         server.bind("/set_slider", self.set_slider)
         server.bind("/song_pos", self.update_slider)
         server.bind("/normalize", self.normalize_slider)
@@ -1157,17 +1117,16 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.song_local = [0]
         GUILayout.slider = None
         GUILayout.playing_song = False
-        GUILayout.check_are_play = None
+        GUILayout.check_are_paused = None
         self.loadingosctimer = Clock.schedule_interval(self.waitingforoscload, 1)
-        self.fire_stop = Clock.schedule_interval(self.checking_for_stop, 1)
-        GUILayout.gui_resume_check = Clock.schedule_interval(self.set_gui_from_check, 1)
         GUILayout.get_update_slider = Clock.schedule_interval(
             self.wait_update_slider, 1
         )
 
     def second_screen(self):
         songs = self.get_play_list()
-        self.ids.rv.data = [{"text": str(x[:-4])} for x in songs]
+        uniq = list(dict.fromkeys(songs))
+        self.ids.rv.data = [{"text": str(x[:-4])} for x in uniq]
 
     def change_screen_item(self, nav_item):
         self.second_screen2()
@@ -1175,7 +1134,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def second_screen2(self):
         songs, pname = self._active_playlist_song_names()
-        self.ids.rv.data = [{"text": str(x[:-4])} for x in songs]
+        uniq = list(dict.fromkeys(songs))
+        self.ids.rv.data = [{"text": str(x[:-4])} for x in uniq]
         try:
             self.ids.play_list.text = f"Current Playlist: {pname}"
         except Exception as e:
@@ -1220,6 +1180,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         try:
             track_path = getattr(self, "selected_track_path", None)
             cover_path = getattr(self, "selected_cover_path", None)
+
+            if not track_path and isinstance(message, str):
+                import os
+                base = os.path.splitext(os.path.basename(message))[0]
+                folder = get_app_writable_dir("Downloaded/Played")
+                track_path = os.path.join(folder, f"{base}.m4a")
+                cover_path = os.path.join(folder, f"{base}.jpg")
+
             if not track_path and isinstance(message, dict):
                 track_path = message.get("path")
                 cover_path = message.get("cover_path")
@@ -1229,56 +1197,41 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 return
 
             import os
-
             for p in (track_path, cover_path):
                 if p and os.path.exists(p):
                     try:
                         os.remove(p)
                     except Exception as e:
                         print(f"Warning: could not delete {p}: {e}")
-            pm = getattr(self, "playlists", None)
-            pid = getattr(self, "active_playlist_id", None)
 
-            if pm and pid is not None:
-                import os
-
+            pm = getattr(self, "_playlist_manager", None)
+            ap = pm.active_playlist() if pm else None
+            if ap:
                 norm_target = os.path.normpath(os.path.realpath(track_path))
-
+                remove_index = None
                 try:
-                    tracks = pm.get_tracks(pid)
+                    tracks = pm.get_tracks(ap.id)
                 except Exception:
                     tracks = []
-
-                remove_index = None
                 for idx, item in enumerate(tracks):
-                    if isinstance(item, dict):
-                        p = item.get("path") or item.get("file") or item.get("src")
-                    else:
-                        p = str(item)
+                    p = item.get("path") if isinstance(item, dict) else getattr(item, "path", None)
                     if not p:
                         continue
-                    if os.path.normpath(os.path.realpath(p)) == norm_target:
+                    np = os.path.normpath(os.path.realpath(p))
+                    if np == norm_target or os.path.basename(np) == os.path.basename(norm_target):
                         remove_index = idx
                         break
-
                 if remove_index is not None:
                     try:
-                        pm.remove_track(pid, remove_index)
-                        pm.save()
+                        pm.remove_track(ap.id, remove_index)
                     except Exception as e:
                         print(f"Warning: playlist removal failed: {e}")
-                else:
-                    print(
-                        "Note: track not found in playlist; data may already be in sync."
-                    )
 
             with contextlib.suppress(Exception):
-                self._reload_playlist_view()
+                self._playlist_refresh_tracks()
             with contextlib.suppress(Exception):
-                self._apply_idle_ui_state()
-            if dlg := getattr(self, "dialog", None):
-                with contextlib.suppress(Exception):
-                    dlg.dismiss()
+                self.second_screen2()
+
             toast("Track deleted and removed from playlist.")
         except Exception as e:
             print("Error in remove_track:", e)
@@ -1309,6 +1262,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         else:
             settitle1 = self.settitle
         MDApp.get_running_app().root.ids.song_title.text = settitle1
+
         if GUILayout.slider is None:
             self.make_slider()
         self.playing()
@@ -1359,6 +1313,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             if utils.get_platform() == "android":
                 MDApp.get_running_app().root.ids.imageView.size_hint_x = 0.7
                 MDApp.get_running_app().root.ids.imageView.size_hint_y = 0.7
+
         self.settitle = base
         settitle1 = (
             f"{self.settitle[:51]}..." if len(self.settitle) > 51 else self.settitle
@@ -1484,17 +1439,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.repeat_btt.opacity = 1
         MDApp.get_running_app().root.ids.next_btt.opacity = 1
         MDApp.get_running_app().root.ids.previous_btt.opacity = 1
-        MDApp.get_running_app().root.ids.song_position.opacity = 1
-        MDApp.get_running_app().root.ids.song_max.opacity = 1
 
     def error_reset(self, msg):
         MDApp.get_running_app().root.ids.imageView.source = default_cover_path()
         if msg == "search":
             MDApp.get_running_app().root.ids.info.text = "Error Searching Music"
-            self._reset_to_startup_gui
         elif msg == "download":
             MDApp.get_running_app().root.ids.info.text = "Error downloading Music"
-        self._reset_to_startup_gui
+        self._reset_to_startup_gui()
         self.paused = False
         self.file_loaded = False
 
@@ -1521,7 +1473,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         )
 
     def checkfile(self):
-        self.fire_stop()
         MDApp.get_running_app().root.ids.play_btt.disabled = True
         MDApp.get_running_app().root.ids.info.text = ""
         MDApp.get_running_app().root.ids.song_position.text = ""
@@ -1541,9 +1492,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.loadingfiletimer()
 
     def set_title_refresh_playlist(self, apm, ap):
-        title = (self.settitle or "").strip()
+        title = utils.safe_filename((self.settitle or "").strip())
         fname = title if title.endswith(".m4a") else f"{title}.m4a"
         full_path = os.path.join(self.set_local_download, fname)
+
         apm.add_tracks(ap.id, [full_path])
         with contextlib.suppress(Exception):
             self._playlist_refresh_tracks()
@@ -1601,6 +1553,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.next_btt.disabled = False
         MDApp.get_running_app().root.ids.previous_btt.disabled = False
         MDApp.get_running_app().root.ids.repeat_btt.opacity = 1
+        MDApp.get_running_app().root.ids.song_position.opacity = 1
+        MDApp.get_running_app().root.ids.song_max.opacity = 1
         GUILayout.playing_song = True
         if self.paused is False:
             self.load_file()
@@ -1610,19 +1564,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     @staticmethod
     def wait_update_slider(dt):
-        GUILayout.send("get_update_slider", "play")
+        GUILayout.send("get_update_slider", "tick")
 
     def waitingforoscload(self, dt):
         if self.fileosc_loaded is True:
             self.fileosc_loaded = False
             self.updating_gui_slider()
             self.loadingosctimer.cancel()
-
-    def checking_for_stop(self, dt):
-        if self.fire_off_stop is True:
-            self.fire_off_stop = False
-            self.stop()
-            self.fire_stop.cancel()
 
     def updating_gui_slider(self):
         self.playlist = True
@@ -1815,7 +1763,7 @@ class Musicapp(MDApp):
         """
         Resume flow:
           1) Start safe (everything disabled/idle)
-          2) Ping service ("iamawake" + "areweplaying")
+          2) Ping service ("iamawake")
           3) Poll for answer and set GUI accordingly
           4) Re-enable slider/controls only if actually playing
         """
@@ -1825,17 +1773,13 @@ class Musicapp(MDApp):
         GUILayout.send("iamawake", "hello")
 
         with contextlib.suppress(Exception):
-            root.ids.slider.disabled = True
+            if GUILayout.slider is not None:
+                GUILayout.slider.disabled = True
         with contextlib.suppress(Exception):
             if hasattr(root.ids, "next_btt"):
                 root.ids.next_btt.disabled = True
             if hasattr(root.ids, "previous_btt"):
                 root.ids.previous_btt.disabled = True
-
-        if getattr(root, "set_gui_from_none", None):
-            with contextlib.suppress(Exception):
-                root.set_gui_from_none()
-
         with contextlib.suppress(Exception):
             if getattr(root, "refresh_playlist", None):
                 Clock.schedule_once(lambda dt: root.refresh_playlist(), 0)
@@ -1843,69 +1787,90 @@ class Musicapp(MDApp):
                 Clock.schedule_once(
                     lambda dt: root._send_active_playlist_to_service(), 0
                 )
-
         with contextlib.suppress(Exception):
             if getattr(root, "get_update_slider", None):
                 root.get_update_slider.cancel()
         with contextlib.suppress(Exception):
             root.get_update_slider = Clock.schedule_interval(root.wait_update_slider, 1)
 
-        with contextlib.suppress(Exception):
-            GUILayout.check_are_play = "None"
-        GUILayout.send("areweplaying", "")
 
         def _apply_playing_state():
             with contextlib.suppress(Exception):
-                root.ids.slider.disabled = False
+                if GUILayout.slider is not None:
+                    GUILayout.slider.disabled = False
+                    GUILayout.slider.opacity = 1
             with contextlib.suppress(Exception):
                 if hasattr(root.ids, "next_btt"):
                     root.ids.next_btt.disabled = False
+                    root.ids.next_btt.opacity = 1
                 if hasattr(root.ids, "previous_btt"):
                     root.ids.previous_btt.disabled = False
+                    root.ids.previous_btt.opacity = 1
             if getattr(root, "set_gui_conditions", None):
                 with contextlib.suppress(Exception):
-                    root.set_gui_conditions(1, False, True, 0)
+                    root.set_gui_conditions(0, True, False, 1)
             elif getattr(root, "set_gui_from_check", None):
                 with contextlib.suppress(Exception):
                     root.set_gui_from_check(0)
 
-        def _apply_idle_state():
+        def _apply_no_track_state():
             with contextlib.suppress(Exception):
-                root.ids.slider.disabled = True
+                if GUILayout.slider is not None:
+                    GUILayout.slider.disabled = True
+                    GUILayout.slider.opacity = 0
             with contextlib.suppress(Exception):
                 if hasattr(root.ids, "next_btt"):
                     root.ids.next_btt.disabled = True
+                    root.ids.next_btt.opacity = 0
                 if hasattr(root.ids, "previous_btt"):
                     root.ids.previous_btt.disabled = True
-            if getattr(root, "set_gui_from_none", None):
+                    root.ids.previous_btt.opacity = 0
+            with contextlib.suppress(Exception):
+                root.set_gui_conditions_from_none()
+
+        def _apply_paused_state():
+            with contextlib.suppress(Exception):
+                if GUILayout.slider is not None:
+                    GUILayout.slider.disabled = False
+                    GUILayout.slider.opacity = 1
+            with contextlib.suppress(Exception):
+                if hasattr(root.ids, "next_btt"):
+                    root.ids.next_btt.disabled = False
+                    root.ids.next_btt.opacity = 1
+                if hasattr(root.ids, "previous_btt"):
+                    root.ids.previous_btt.disabled = False
+                    root.ids.previous_btt.opacity = 1
+            if getattr(root, "set_gui_conditions", None):
                 with contextlib.suppress(Exception):
-                    root.set_gui_from_none()
+                    root.set_gui_conditions(1, False, True, 0)
 
         poll_ev = {"ev": None}
         timeout_ev = {"ev": None}
 
         def _poll(dt):
-            state = getattr(GUILayout, "check_are_play", "None")
-            if state == "True":
-                with contextlib.suppress(Exception):
-                    Clock.unschedule(poll_ev["ev"])
-                with contextlib.suppress(Exception):
-                    Clock.unschedule(timeout_ev["ev"])
+            paused = getattr(GUILayout, "check_are_paused", "None")
+            if paused == "False":
+                _stop_all()
                 _apply_playing_state()
-            elif state == "False":
-                with contextlib.suppress(Exception):
-                    Clock.unschedule(poll_ev["ev"])
-                with contextlib.suppress(Exception):
-                    Clock.unschedule(timeout_ev["ev"])
-                _apply_idle_state()
+            elif paused == "True":
+                _stop_all()
+                _apply_paused_state()
+            else:
+                return
 
-        def _timeout(dt):
+        def _stop_all():
             with contextlib.suppress(Exception):
                 Clock.unschedule(poll_ev["ev"])
-            _apply_idle_state()
+            with contextlib.suppress(Exception):
+                Clock.unschedule(timeout_ev["ev"])
+
+        def _timeout(dt):
+            _stop_all()
+            _apply_no_track_state()
 
         poll_ev["ev"] = Clock.schedule_interval(_poll, 0.25)
         timeout_ev["ev"] = Clock.schedule_once(_timeout, 5.0)
+        Clock.schedule_once(lambda dt: Window.canvas.ask_update(), 0)
 
 
 if __name__ == "__main__":
