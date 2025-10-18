@@ -1467,7 +1467,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.next_btt.disabled = True
         MDApp.get_running_app().root.ids.previous_btt.disabled = True
         MDApp.get_running_app().root.ids.info.text = "Downloading audio... Please wait"
-        payload = json.dumps([self.setytlink, self.settitle, self.set_local, self.set_local_download])
+        payload = json.dumps(
+            [self.setytlink, self.settitle, self.set_local, self.set_local_download]
+        )
         GUILayout.send("downloadyt", payload)
 
     def file_is_downloaded(self, *val):
