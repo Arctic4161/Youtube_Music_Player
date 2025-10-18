@@ -26,7 +26,7 @@ from kivy.config import Config
 if utils.get_platform() == "android":
     Config.set("input", "mtdev_%(name)s", "probesysfs,provider=mtdev")
     Config.set("input", "hid_%(name)s", "probesysfs,provider=hidinput")
-    Config.set('postproc', 'double_tap_distance', '20')
+    Config.set("postproc", "double_tap_distance", "20")
 else:
     Config.set("input", "mouse", "mouse,disable_multitouch")
 
@@ -255,9 +255,7 @@ class MySlider(MDSlider):
             )
 
             GUILayout.send("play", "play")
-            Clock.schedule_once(
-                lambda dt: GUILayout.send("seek_seconds", str(int(secs))), 0
-            )
+            Clock.schedule_once(lambda dt: GUILayout.send("seek_seconds", str(secs)), 0)
             Clock.schedule_once(lambda dt: GUILayout.send("iamawake", "ping"), 0.05)
             Clock.schedule_once(
                 lambda dt: setattr(GUILayout, "is_scrubbing", False), 0.1
@@ -490,13 +488,20 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             except Exception:
                 with contextlib.suppress(Exception):
                     toast("Song not found")
-            with contextlib.suppress(Exception):
-                self._reset_to_startup_gui()
+            self._reset_to_startup_gui()
 
         Clock.schedule_once(_do, 0)
 
     def check_are_we_playing(self, *val):
-        GUILayout.check_are_paused = "".join(val)
+        raw = "".join(val)
+        if raw in {"True", "False", "None"}:
+            GUILayout.check_are_paused = raw
+        else:
+            GUILayout.check_are_paused = (
+                "True"
+                if raw.lower() == "true"
+                else "False" if raw.lower() == "false" else "None"
+            )
 
     def set_gui_from_check(self, dt):
         if GUILayout.check_are_paused == "False":
@@ -524,6 +529,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         root.ids.info.text = ""
         root.ids.song_position.text = ""
         root.ids.song_max.text = ""
+        root.ids.song_position.opacity = 0
+        root.ids.song_max.opacity = 0
         with contextlib.suppress(Exception):
             root.ids.play_btt.opacity = 0
             root.ids.play_btt.disabled = True
@@ -578,16 +585,16 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def next(self):
         self.set_next_previous_bttns()
-        if self.playlist:
-            GUILayout.send("next", self.playlist)
+        if self.playlist_mode:
+            GUILayout.send("next", self.playlist_mode)
         else:
             self.count = self.count + 1
             self.retrieve_text()
 
     def previous(self):
         self.set_next_previous_bttns()
-        if self.playlist:
-            GUILayout.send("previous", self.playlist)
+        if self.playlist_mode:
+            GUILayout.send("previous", self.playlist_mode)
         else:
             self.count = self.count - 1
             self.retrieve_text()
@@ -626,7 +633,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         elif message_type == "stop":
             GUILayout.client.send_message("/stop", message)
         elif message_type == "playlist":
-            GUILayout.client.send_message("/playlist", message)
+            GUILayout.client.send_message("/playlist", [message])
         elif message_type == "update_load_fs":
             GUILayout.client.send_message("/update_load_fs", message)
         elif message_type == "previous":
@@ -646,7 +653,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def _active_playlist_song_names(self):
         names = []
-        pname = "Downloads"
+        pname = "Downloaded"
         with contextlib.suppress(Exception):
             apm = getattr(self, "_playlist_manager", None)
             ap = apm.active_playlist() if apm else None
@@ -661,17 +668,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         return names, pname
 
     def _send_active_playlist_to_service(self):
-        with contextlib.suppress(Exception):
-            with contextlib.suppress(Exception):
-                songs, _ = self._active_playlist_song_names()
-                GUILayout.send("playlist", songs)
-        if not getattr(GUILayout, "playing_song", False):
-            return
         songs, _ = self._active_playlist_song_names()
-        if len(songs) >= 2:
+        payload = json.dumps(songs)
+        GUILayout.send("playlist", payload)
+        if len(songs) >= 2 and getattr(GUILayout, "playing_song", False):
             self.set_playlist(True, False, 1)
-            GUILayout.send("playlist", songs)
-        else:
+        elif getattr(GUILayout, "playing_song", False):
             self.set_playlist(False, True, 0)
 
     def _update_active_playlist_badge(self):
@@ -745,7 +747,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if active and active.tracks:
             song_title = f"{active.tracks[0].title}.m4a"
             self.getting_song(song_title)
-        self.second_screen2()
         with contextlib.suppress(Exception):
             self.change_screen_item("Screen 1")
 
@@ -1055,9 +1056,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         names = [os.path.basename(t.path) for t in active.tracks]
         if len(names) >= 2:
             self.set_playlist(True, False, 1)
-            GUILayout.send("playlist", names)
         else:
             self.set_playlist(False, True, 0)
+        with contextlib.suppress(Exception):
+            self._send_active_playlist_to_service()
         self.getting_song(names[index])
         with contextlib.suppress(Exception):
             self.change_screen_item("Screen 1")
@@ -1093,9 +1095,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.result = None
         self.result1 = {}
         self.file_loaded = False
-        self.playlist = False
+        self.playlist_mode = False
         self.repeat_selected = False
         self.shuffle_selected = False
+        self._screen2_is_downloads = True
         if utils.get_platform() == "android":
             self._start_music_service_user_initiated()
         else:
@@ -1126,7 +1129,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.song_local = [0]
         GUILayout.slider = None
         GUILayout.playing_song = False
-        GUILayout.check_are_paused = None
+        GUILayout.check_are_paused = "None"
         self.loadingosctimer = Clock.schedule_interval(self.waitingforoscload, 1)
         GUILayout.get_update_slider = Clock.schedule_interval(
             self.wait_update_slider, 1
@@ -1136,9 +1139,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         songs = self.get_play_list()
         uniq = list(dict.fromkeys(songs))
         self.ids.rv.data = [{"text": str(x[:-4])} for x in uniq]
+        self._screen2_is_downloads = True
 
     def change_screen_item(self, nav_item):
-        self.second_screen2()
+        if not getattr(self, "_screen2_is_downloads", False):
+            self.second_screen2()
         self.ids.bottom_nav.switch_tab(nav_item)
 
     def second_screen2(self):
@@ -1149,6 +1154,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.ids.play_list.text = f"Current Playlist: {pname}"
         except Exception as e:
             print(e)
+        self._screen2_is_downloads = False
 
     def message_box(self, message):
         """Options popup (Page 2): MDDialog version, same logic (Yes deletes)."""
@@ -1187,9 +1193,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         """
         Delete media/cover on disk and remove the item from the active playlist.
         Works whether `message` is a filename string (Page 2) or a dict with
-        'path'/ 'cover_path' (Page 3).
+        'path' / 'cover_path' (Page 3).
+
+        If the target is the CURRENTLY PLAYING track, do NOT delete.
+        Show a toast + dialog and return early.
         """
         try:
+            # --- Resolve absolute paths ---
             track_path = getattr(self, "selected_track_path", None)
             cover_path = getattr(self, "selected_cover_path", None)
 
@@ -1205,6 +1215,15 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
             if not track_path:
                 toast("No track selected.")
+                return
+
+            current_base = (
+                os.path.basename(self.stream) if getattr(self, "stream", None) else None
+            )
+            target_base = os.path.basename(track_path)
+            if current_base and target_base and current_base == target_base:
+                with contextlib.suppress(Exception):
+                    toast("Can't delete the current track. Stop playback first.")
                 return
 
             for p in (track_path, cover_path):
@@ -1233,7 +1252,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
             with contextlib.suppress(Exception):
                 self._playlist_refresh_tracks()
-                self.library_tab.ids.rv_tracks.refresh_from_data()
+                if getattr(self, "library_tab", None):
+                    self.library_tab.ids.rv_tracks.refresh_from_data()
 
             with contextlib.suppress(Exception):
                 self.second_screen2()
@@ -1242,14 +1262,21 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             if dlg := getattr(self, "dialog", None):
                 with contextlib.suppress(Exception):
                     dlg.dismiss()
-
+            with contextlib.suppress(Exception):
+                self._send_active_playlist_to_service()
             toast("Track deleted and removed from playlist.")
         except Exception as e:
             print("Error in remove_track:", e)
             toast("Delete failed.")
 
     def getting_song(self, message):
-        with contextlib.suppress(Exception):
+        try:
+            if getattr(self, "_screen2_is_downloads", False):
+                songs = self.get_play_list() or []
+                GUILayout.send("playlist", json.dumps(songs))
+            else:
+                self._send_active_playlist_to_service()
+        except Exception:
             self._send_active_playlist_to_service()
         GUILayout.send("update_load_fs", "update_load_fs")
         if GUILayout.playing_song:
@@ -1372,7 +1399,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if GUILayout.slider is not None:
             GUILayout.slider.disabled = True
             GUILayout.slider.opacity = 0
-        self.playlist = False
+        self.playlist_mode = False
         self.count = 0
         self.results_loaded = False
         self.retrieve_text()
@@ -1552,13 +1579,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.get_update_slider = Clock.schedule_interval(
             self.wait_update_slider, 1
         )
+        if not getattr(self, "_screen2_is_downloads", False):
+            self._send_active_playlist_to_service()
         self.second_screen2()
-        songs = self.get_play_list()
-        if len(songs) >= 2:
-            self.set_playlist(True, False, 1)
-            GUILayout.send("playlist", songs)
-        else:
-            self.set_playlist(False, True, 0)
         MDApp.get_running_app().root.ids.play_btt.disabled = True
         MDApp.get_running_app().root.ids.pause_btt.disabled = False
         MDApp.get_running_app().root.ids.play_btt.opacity = 0
@@ -1588,7 +1611,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.loadingosctimer.cancel()
 
     def updating_gui_slider(self):
-        self.playlist = True
+        self.playlist_mode = True
         self.count = 0
         GUILayout.slider.disabled = False
         GUILayout.slider.opacity = 1
@@ -1598,7 +1621,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.repeat_btt.opacity = 1
 
     def set_playlist(self, arg0, arg1, arg2):
-        self.playlist = arg0
+        self.playlist_mode = arg0
         MDApp.get_running_app().root.ids.shuffle_btt.disabled = arg1
         MDApp.get_running_app().root.ids.shuffle_btt.opacity = arg2
 
@@ -1648,7 +1671,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def normalize_slider(self):
         seekingsound = float(GUILayout.slider.value)
-        GUILayout.send("seek_seconds", str(int(seekingsound)))
+        GUILayout.send("seek_seconds", str(seekingsound))
 
     def repeat_songs_check(self):
         if self.repeat_selected is True:
@@ -1686,15 +1709,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         """Reset GUI to a clean idle state when the last track finishes."""
         self.gui_reset = True
         self.paused = False
-        self.playlist = False
+        self.playlist_mode = False
         GUILayout.playing_song = False
-
         with contextlib.suppress(Exception):
             GUILayout.get_update_slider.cancel()
-
-        with contextlib.suppress(Exception):
-            self._reset_to_startup_gui()
-        Clock.schedule_once(lambda dt: self._reset_to_startup_gui(), 0)
+        Clock.schedule_once(lambda dt: self.set_gui_conditions_from_none(), 0)
 
 
 class Musicapp(MDApp):

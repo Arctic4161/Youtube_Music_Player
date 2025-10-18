@@ -137,11 +137,7 @@ class PlaylistManager:
     def create_and_save_playlist(self, playlists, raw):
         self.data["playlists"] = playlists
         self.data["active_playlist_id"] = raw.get("active_playlist_id")
-        if not playlists:
-            self.create_playlist("Favorites")
-        if not self.data["active_playlist_id"] and self.data["playlists"]:
-            self.data["active_playlist_id"] = self.data["playlists"][0].id
-            self.save()
+        self.save()
 
     def save(self) -> None:
         """
@@ -208,8 +204,6 @@ class PlaylistManager:
     def create_playlist(self, name: str) -> str:
         pid = str(uuid.uuid4())
         self.data["playlists"].append(Playlist(id=pid, name=name, tracks=[]))
-        if not self.data["active_playlist_id"]:
-            self.data["active_playlist_id"] = pid
         self.save()
         return pid
 
@@ -220,29 +214,24 @@ class PlaylistManager:
 
     def delete_playlist(self, pid: str) -> None:
         self.data["playlists"] = [p for p in self.data["playlists"] if p.id != pid]
-        if self.data["active_playlist_id"] == pid:
-            self.data["active_playlist_id"] = (
-                self.data["playlists"][0].id if self.data["playlists"] else None
-            )
+        if self.data.get("active_playlist_id") == pid:
+            self.data["active_playlist_id"] = None
         self.save()
 
     def add_tracks(self, pid: str, paths: List[str]) -> None:
-        """
-        Add tracks by filesystem path, storing RELATIVE paths for anything under
-        the app sandbox so the JSON survives reinstalls / sandbox changes.
-        Also skips duplicates by normalized path and within the import batch.
-        """
         p = self._find(pid)
         if not p:
             return
+
         root = get_app_writable_dir("Downloaded/Played")
         root_norm = os.path.normcase(os.path.normpath(root))
 
-        def _norm(pth: str) -> str:
-            try:
-                return os.path.normcase(os.path.normpath(pth))
-            except Exception:
-                return pth
+        def _abs_norm(pth: str) -> str:
+            """Return a normcased absolute path; resolve rel paths under sandbox."""
+            np = os.path.normpath(pth or "")
+            if np and not os.path.isabs(np):
+                np = os.path.join(root, np)
+            return os.path.normcase(os.path.normpath(np))
 
         def _to_rel_if_in_sandbox(pth: str) -> str:
             try:
@@ -255,7 +244,9 @@ class PlaylistManager:
                 return pth
 
         existing = {
-            _norm(getattr(t, "path", "")) for t in p.tracks if getattr(t, "path", "")
+            _abs_norm(getattr(t, "path", ""))
+            for t in p.tracks
+            if getattr(t, "path", "")
         }
         seen_batch = set()
         added_any = False
@@ -265,13 +256,12 @@ class PlaylistManager:
                 continue
 
             base_name = os.path.basename(path)
-            name_wo_ext, ext = os.path.splitext(base_name)
-
+            name_wo_ext, _ = os.path.splitext(base_name)
             safe_name = safe_filename(name_wo_ext)
             title = safe_name
 
-            npath = _norm(path)
-            if not npath or npath in existing or npath in seen_batch:
+            key = _abs_norm(path)
+            if not key or key in existing or key in seen_batch:
                 continue
 
             rel_or_abs = _to_rel_if_in_sandbox(path)
@@ -284,8 +274,8 @@ class PlaylistManager:
                     thumb = _to_rel_if_in_sandbox(cand)
 
             p.tracks.append(Track(title=title, path=rel_or_abs, thumb=thumb))
-            existing.add(npath)
-            seen_batch.add(npath)
+            existing.add(key)
+            seen_batch.add(key)
             added_any = True
 
         if added_any:

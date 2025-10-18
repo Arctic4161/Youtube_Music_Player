@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import json
 import os
@@ -228,16 +229,16 @@ class Gui_sounds:
     sound = None
     paused = False
     checking_it = None
-    main_paused = True
+    main_paused = False
     previous = False
-    looping_bool = False
-    shuffle_bool = "False"
+    loop_enabled = False
     shuffle_bag = []
     _bag_source_len = 0
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._next_thread = None
+        self._end_fired = False
         self._next_thread_stop = threading.Event()
         if utils.get_platform() == "android":
             self.PlaybackState = autoclass("android.media.session.PlaybackState")
@@ -263,30 +264,98 @@ class Gui_sounds:
 
     def _check_for_next_loop(self):
         """
-        Internal loop that replaces while True: ... in check_for_next().
-        It checks the stop flag every tick so it can shut down cleanly.
+        End-of-track monitor (service-side, GUI-independent).
+
+        Behavior:
+          - If SHUFFLE is ON → always advance (service shuffle bag decides).
+          - If SHUFFLE is OFF:
+              * Auto-advance when there IS a next track.
+              * RESET the GUI when the LAST track finishes.
         """
+        import os
+
+        TICK = 0.25  # 250 ms cadence
+        REM_EPS = 0.12  # treat <=120 ms remaining as "at end"
+        STUCK_TICKS = int(1.0 / TICK)  # ~1s with no position change
+
+        self._end_fired = False
+        last_pos = -1.0
+        stuck = 0
+
         while not self._next_thread_stop.is_set():
             try:
-                if (
-                    Gui_sounds.sound is not None
-                    and (Gui_sounds.paused is False or Gui_sounds.sound.state == "play")
-                    and Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1
-                ):
-                    if Gui_sounds.previous is True or Gui_sounds.sound.loop is True:
+                snd = getattr(Gui_sounds, "sound", None)
+                has = bool(snd)
+                length = float(getattr(Gui_sounds, "length", 0.0) or 0.0)
+                pos = float(snd.get_pos() or 0.0) if has else 0.0
+                remaining = max(0.0, length - pos)
+
+                paused = bool(getattr(Gui_sounds, "paused", False))
+                state = getattr(snd, "state", "") if snd else ""
+                playing = has and (not paused or state == "play")
+
+                # Progress tracking (covers weird/unknown lengths)
+                if playing:
+                    if pos <= last_pos + 0.01:  # <=10ms forward progress
+                        stuck += 1
+                    else:
+                        stuck = 0
+                    last_pos = pos
+
+                at_true_end = playing and length > 0 and remaining <= REM_EPS
+                appears_eof = playing and (stuck >= STUCK_TICKS) and pos > 0.0
+                bg = bool(getattr(Gui_sounds, "main_paused", False))
+                endish = at_true_end or appears_eof or (bg and remaining <= REM_EPS)
+
+                if endish and not self._end_fired:
+                    self._end_fired = True
+
+                    # If user held "previous" or explicit loop on the sound, do nothing.
+                    if (
+                        getattr(Gui_sounds, "previous", False) is True
+                        or getattr(snd, "loop", False) is True
+                    ):
+                        self._next_thread_stop.wait(TICK)
+                        self._end_fired = False
                         continue
-                    if Gui_sounds.playlist is False or Gui_sounds.playlist == "False":
-                        Gui_sounds.send("reset_gui", "reset_gui")
-                        Gui_sounds.checking_it = None
-                        break
-                    Gui_sounds.next()
-                elif Gui_sounds.main_paused and Gui_sounds.sound is not None:
-                    if Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1:
+
+                    # Normalize playlist + current
+                    items = (
+                        Gui_sounds.playlist
+                        if isinstance(getattr(Gui_sounds, "playlist", None), list)
+                        else []
+                    )
+                    cur = os.path.basename(
+                        getattr(Gui_sounds, "file_to_load", "") or ""
+                    )
+                    try:
+                        idx = items.index(cur)
+                    except ValueError:
+                        idx = None
+
+                    shuffle_on = bool(getattr(Gui_sounds, "shuffle_selected", False))
+
+                    if shuffle_on and len(items) >= 1:
+                        # Shuffle: always advance; service shuffle bag chooses next
                         Gui_sounds.next()
-                _time.sleep(1)
+                    else:
+                        # Non-shuffle:
+                        #  - If there's a next track (idx < last), advance.
+                        #  - If at last (or missing/empty), reset GUI.
+                        has_next = (idx is not None) and (0 <= idx < len(items) - 1)
+                        if has_next:
+                            Gui_sounds.next()
+                        else:
+                            Gui_sounds.send("reset_gui", "reset_gui")
+                            Gui_sounds.checking_it = None
+                            break  # we're done; leave the loop
+
+                # Always yield to keep OSC updates flowing and avoid hot loops
+                self._next_thread_stop.wait(TICK)
+
             except Exception as e:
                 print("Next-monitor loop error:", e)
-            self._next_thread_stop.wait(0.25)
+                self._next_thread_stop.wait(TICK)
 
     @staticmethod
     def load(*val):
@@ -324,15 +393,13 @@ class Gui_sounds:
                 )
             Gui_sounds.send("reset_gui", "reset_gui")
             return
-
         Gui_sounds.file_to_load = path_to_try
+        GS._end_fired = False
         Gui_sounds.sound = SoundLoader.load(Gui_sounds.file_to_load)
         if not Gui_sounds.sound:
             Gui_sounds.send("reset_gui", "reset_gui")
             return
-
-        with contextlib.suppress(Exception):
-            Gui_sounds.sound.loop = str(Gui_sounds.looping_bool) == "True"
+        GS.set_loop(GS.loop_enabled)
         Gui_sounds.length = Gui_sounds.sound.length or 0
         Gui_sounds.send("set_slider", str(Gui_sounds.length))
         if Gui_sounds.load_from_service:
@@ -413,6 +480,7 @@ class Gui_sounds:
         Gui_sounds.load_from_service = False
 
     def play(self, *val):
+        self._end_fired = False
         if utils.get_platform() == "android":
             acquire_wakelock()
             ctx, _ = wait_for_service_ctx()
@@ -429,7 +497,8 @@ class Gui_sounds:
             Gui_sounds.paused = False
             Gui_sounds.song_local = None
             Gui_sounds.previous_songs.append(os.path.basename(Gui_sounds.file_to_load))
-            Gui_sounds.sound.play()
+            with contextlib.suppress(Exception):
+                Gui_sounds.sound.play()
             Gui_sounds.previous = False
             if Gui_sounds.checking_it is None:
                 self.start_next_monitor()
@@ -524,9 +593,6 @@ class Gui_sounds:
 
     def pause_val(self, *val):
         Gui_sounds.main_paused = True
-        Gui_sounds.previous = False
-        Gui_sounds.looping_bool = False
-        Gui_sounds.shuffle_bool = "False"
 
     def stop(self, *val):
         if Gui_sounds.sound is not None and Gui_sounds.sound.state == "play":
@@ -615,7 +681,7 @@ class Gui_sounds:
                     if Gui_sounds.sound is not None:
                         Gui_sounds.check_against_previous(current_song, songs)
                 else:
-                    Gui_sounds.playlist = False
+                    Gui_sounds.playlist = []
 
     @staticmethod
     def check_against_previous(current_song, songs):
@@ -641,30 +707,79 @@ class Gui_sounds:
         Gui_sounds.set_local = message
         Gui_sounds.load(Gui_sounds.stream)
 
-    def play_list(self, *val):
-        Gui_sounds.playlist = "".join(val[1:-1]).strip("'").split("', '")
+    @staticmethod
+    def play_list(payload):
+        items = None
+        if isinstance(payload, (list, tuple)):
+            if len(payload) == 1:
+                p0 = payload[0]
+                if isinstance(p0, (list, tuple)):
+                    items = list(p0)
+                else:
+                    s = (
+                        p0.decode("utf-8", "ignore")
+                        if isinstance(p0, (bytes, bytearray))
+                        else str(p0)
+                    ).strip()
+                    with contextlib.suppress(Exception):
+                        val = json.loads(s)
+                        if isinstance(val, (list, tuple)):
+                            items = list(val)
+                    if items is None:
+                        with contextlib.suppress(Exception):
+                            val = ast.literal_eval(s)
+                            if isinstance(val, (list, tuple)):
+                                items = list(val)
+                    if items is None:
+                        items = [s] if s else []
+            else:
+                items = list(payload)
+
+        if items is None:
+            s = (
+                payload.decode("utf-8", "ignore")
+                if isinstance(payload, (bytes, bytearray))
+                else str(payload)
+            ).strip()
+            with contextlib.suppress(Exception):
+                val = json.loads(s)
+                if isinstance(val, (list, tuple)):
+                    items = list(val)
+        if items is None:
+            with contextlib.suppress(Exception):
+                val = ast.literal_eval(s)
+                if isinstance(val, (list, tuple)):
+                    items = list(val)
+        if items is None:
+            items = [s] if s else []
+        Gui_sounds.playlist = [os.path.basename(str(x)) for x in items]
 
     def refresh_gui(self, *val):
         Gui_sounds.main_paused = False
+        state = "True" if Gui_sounds.paused else "False"
         if Gui_sounds.load_from_service:
             Gui_sounds.send("update_image", Gui_sounds.set_local)
         if Gui_sounds.sound is None:
             Gui_sounds.send("are_we", "None")
         else:
-            Gui_sounds.send("are_we", Gui_sounds.paused)
+            Gui_sounds.send("are_we", state)
 
-    @staticmethod
-    def loop(*val):
-        Gui_sounds.looping_bool = "".join(val)
-        with contextlib.suppress(Exception):
-            if Gui_sounds.sound is not None:
-                Gui_sounds.sound.loop = Gui_sounds.looping_bool == "True"
+    def set_loop(self, want: bool):
+        self.loop_enabled = want
+        if self.sound is not None:
+            with contextlib.suppress(Exception):
+                self.sound.loop = self.loop_enabled
+
+    def on_loop_msg(self, *val):
+        raw = "".join(val)
+        want = raw.strip().lower() in {"1", "true", "yes", "on"}
+        self.set_loop(want)
 
     @staticmethod
     def shuffle(*val):
-        Gui_sounds.shuffle_bool = "".join(val)
-        if Gui_sounds.shuffle_bool == "True":
-            Gui_sounds.shuffle_selected = True
+        want = "".join(val).strip().lower() in {"1", "true", "yes", "on"}
+        Gui_sounds.shuffle_selected = want
+        if want:
             try:
                 current = (
                     os.path.basename(Gui_sounds.file_to_load)
@@ -675,7 +790,6 @@ class Gui_sounds:
                 current = None
             Gui_sounds._rebuild_shuffle_bag(exclude_current=current)
         else:
-            Gui_sounds.shuffle_selected = False
             Gui_sounds.shuffle_bag = []
             Gui_sounds._bag_source_len = 0
 
@@ -722,7 +836,7 @@ class Gui_sounds:
             CLIENT.send_message("/are_we", message)
         elif message_type == "song_not_found":
             CLIENT.send_message("/song_not_found", message)
-            CLIENT.send_message("/are_we", message)
+            CLIENT.send_message("/are_we", "None")
         elif message_type == "error_reset":
             CLIENT.send_message("/error_reset", message)
 
@@ -748,7 +862,7 @@ if __name__ == "__main__":
     SERVER.bind("/playlist", GS.play_list)
     SERVER.bind("/update_load_fs", GS.update_load_fs)
     SERVER.bind("/iamawake", GS.refresh_gui)
-    SERVER.bind("/loop", GS.loop)
+    SERVER.bind("/loop", GS.on_loop_msg)
     SERVER.bind("/shuffle", GS.shuffle)
     SERVER.bind("/get_update_slider", GS.update_slider)
     SERVER.bind("/downloadyt", GS.download_yt)
