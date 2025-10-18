@@ -1,4 +1,5 @@
 import contextlib
+import json
 import os
 import sys
 import time
@@ -27,9 +28,10 @@ if utils.get_platform() == "android":
     Config.set("input", "mtdev", "")
     Config.set("input", "hid_input", "")
 else:
-    from threading import Thread
-
     Config.set("input", "mouse", "mouse,disable_multitouch")
+
+from threading import Thread
+
 from kivy.graphics import Color, Rectangle
 from kivy.storage.jsonstore import JsonStore
 from kivy.uix.widget import Widget
@@ -641,7 +643,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         elif message_type == "get_update_slider":
             GUILayout.client.send_message("/get_update_slider", message)
         elif message_type == "downloadyt":
-            GUILayout.client.send_message("/downloadyt", message)
+            GUILayout.client.send_message("/downloadyt", [message])
         elif message_type == "iampaused":
             GUILayout.client.send_message("/iampaused", message)
 
@@ -709,6 +711,19 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             storage = os.path.join(os.getcwd(), "playlists.json")
         self._playlist_manager = PlaylistManager(storage_path=storage)
         self.refresh_playlist()
+
+    def _controls(self, action: str, *args):
+        if action != "enable_play":
+            return
+        ids = self.ids
+        ids.play_btt.disabled = False
+        ids.play_btt.opacity = 1
+        ids.pause_btt.disabled = True
+        ids.pause_btt.opacity = 0
+        ids.next_btt.disabled = False
+        ids.prev_btt.disabled = False
+        ids.song_pos_lbl.opacity = 0
+        ids.song_max_lbl.opacity = 0
 
     def _playlist_refresh_sidebar(self):
         if not getattr(self, "library_tab", None):
@@ -1064,7 +1079,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def __init__(self, **kwargs):
         super(GUILayout, self).__init__(**kwargs)
-        self.fire_off_stop = False
         self.settitle = None
         self.fileosc_loaded = None
         self.length = None
@@ -1109,6 +1123,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         server.bind("/data_info", self.update_info)
         server.bind("/are_we", self.check_are_we_playing)
         server.bind("/song_not_found", self.on_song_not_found)
+        server.bind("/controls", self._controls)
         GUILayout.client = OSCClient("localhost", 3000, encoding="utf8")
         GUILayout.song_local = [0]
         GUILayout.slider = None
@@ -1416,7 +1431,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.setytlink = resultdict["link"]
         thumbnail = resultdict["thumbnails"]
         self.set_local = thumbnail[0]["url"]
-        self.settitle = resultdict["title"]
+        self.settitle = utils.safe_filename(resultdict["title"])
         with contextlib.suppress(Exception):
             MDApp.get_running_app().root.ids.imageView.source = str(self.set_local)
             if utils.get_platform() == "android":
@@ -1452,10 +1467,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.next_btt.disabled = True
         MDApp.get_running_app().root.ids.previous_btt.disabled = True
         MDApp.get_running_app().root.ids.info.text = "Downloading audio... Please wait"
-        GUILayout.send(
-            "downloadyt",
-            [self.setytlink, self.settitle, self.set_local, self.set_local_download],
-        )
+        payload = json.dumps([self.setytlink, self.settitle, self.set_local, self.set_local_download])
+        GUILayout.send("downloadyt", payload)
 
     def file_is_downloaded(self, *val):
         maybe = "".join(val)
@@ -1664,8 +1677,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def reset_gui(self, *val):
         GUILayout.playing_song = False
-        self.fire_off_stop = True
-
         with contextlib.suppress(Exception):
             self._reset_to_startup_gui()
         Clock.schedule_once(lambda dt: self._reset_to_startup_gui(), 0)

@@ -50,10 +50,8 @@ _hidden = [] + collect_submodules('kivymd')
 #  but listing here is harmless and sometimes helps on edge cases.)
 _extra_sources = [
     ('playlist_manager.py', '.'),
-    ('public_persistence.py', '.'),
     ('utils.py', '.'),
-    ('service_main.py', '.'),
-    ('media_recovery.py', '.'),
+    ('./service/main.py', './service'),
 ]
 
 # Convert extra sources to datas so they're shipped alongside the app
@@ -72,8 +70,6 @@ a = Analysis(
     hookspath=_hookspath,
     runtime_hooks=[],
     excludes=[
-        # Trim if desired (examples):
-        # 'tkinter', 'pytest', 'unittest', 'matplotlib.tests',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

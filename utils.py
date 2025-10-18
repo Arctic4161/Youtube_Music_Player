@@ -46,6 +46,7 @@ def find_real_downloads():
 def safe_filename(name: str, default_prefix="track", max_len=120) -> str:
     if not name:
         name = ""
+    name = re.sub(r"['\u2018\u2019]", "", name)
     name = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', " ", name)
     name = re.sub(r"\s+", " ", name).strip(" .")
     name = name[:max_len].rstrip(" .") or f"{default_prefix}_{int(time.time())}"

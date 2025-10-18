@@ -1,4 +1,5 @@
 import contextlib
+import json
 import os
 import os.path
 import random
@@ -7,6 +8,7 @@ import time as _time
 
 import requests
 import yt_dlp
+from yt_dlp import DownloadError
 
 import utils
 from utils import get_app_writable_dir
@@ -201,6 +203,8 @@ class CustomLogger:
             Gui_sounds.send("data_info", msg)
 
     def error(self, msg):
+        with contextlib.suppress(Exception):
+            Gui_sounds.send("data_info", msg)
         print(msg)
 
     def warning(self, msg):
@@ -332,23 +336,13 @@ class Gui_sounds:
         Gui_sounds.length = Gui_sounds.sound.length or 0
         Gui_sounds.send("set_slider", str(Gui_sounds.length))
         if Gui_sounds.load_from_service:
-            try:
-                cover = _resolve_cover_for_audio(Gui_sounds.file_to_load)
-                if cover:
+            with contextlib.suppress(Exception):
+                if cover := _resolve_cover_for_audio(Gui_sounds.file_to_load):
                     Gui_sounds.send("update_image", cover)
-            except Exception:
-                pass
         GS.play()
 
-    def download_yt(self, *val):
-        try:
-            setytlink, settitle, set_local, set_local_download = (
-                "".join(val).strip("['']").split("', '")
-            )
-        except Exception as e:
-            Gui_sounds.send("error_reset", f"bad args: {e}")
-            return
-
+    def download_yt(self, payload_str):
+        setytlink, settitle, set_local, set_local_download = json.loads(payload_str)
         os.makedirs(set_local_download, exist_ok=True)
         safe_title = utils.safe_filename(settitle)
 
@@ -371,8 +365,20 @@ class Gui_sounds:
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([setytlink])
+        except DownloadError as e:
+            msg = str(e)
+            if "Requested format is not available" in msg:
+                Gui_sounds.send(
+                    "data_info", "M4A not available right now. Tap Play to retry."
+                )
+            else:
+                Gui_sounds.send("data_info", f"Download failed: {msg}")
+            Gui_sounds.send("controls", "enable_play")
+            return
+
         except Exception as e:
-            Gui_sounds.send("error_reset", f"download failed: {e}")
+            Gui_sounds.send("data_info", f"Download error: {e}")
+            Gui_sounds.send("controls", "enable_play")
             return
         if not os.path.exists(audio_path):
             Gui_sounds.send("error_reset", "downloaded file not found (.m4a)")
