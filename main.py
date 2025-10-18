@@ -99,7 +99,6 @@ class PlaylistTrackRow(MDBoxLayout):
 
     def _cancel_longpress(self):
         if self._lp_ev is not None:
-
             with contextlib.suppress(Exception):
                 Clock.unschedule(self._lp_ev)
             self._lp_ev = None
@@ -1772,62 +1771,44 @@ class Musicapp(MDApp):
 
     def on_resume(self):
         """
-        Resume flow:
-          1) Start safe (everything disabled/idle)
-          2) Ping service ("iamawake")
-          3) Poll for answer and set GUI accordingly
-          4) Re-enable slider/controls only if actually playing
+        Resume flow (thread-safe):
+          - Hop to main thread and run a handshake that asks the service
+            for state and updates the UI safely.
         """
-        app = self
-        root = app.root
+        Clock.schedule_once(self._resume_handshake, 0)
+        return None
 
-        GUILayout.send("iamawake", "hello")
+    @mainthread
+    def _resume_handshake(self, *args):
+        """Run on the main thread: safely re-sync UI with playback state."""
+        root = self.root
 
         with contextlib.suppress(Exception):
-            if GUILayout.slider is not None:
+            if getattr(GUILayout, "slider", None) is not None:
                 GUILayout.slider.disabled = True
+                GUILayout.slider.opacity = 0
         with contextlib.suppress(Exception):
-            if hasattr(root.ids, "next_btt"):
-                root.ids.next_btt.disabled = True
-            if hasattr(root.ids, "previous_btt"):
-                root.ids.previous_btt.disabled = True
-        with contextlib.suppress(Exception):
-            if getattr(root, "refresh_playlist", None):
-                Clock.schedule_once(lambda dt: root.refresh_playlist(), 0)
-            if getattr(root, "_send_active_playlist_to_service", None):
-                Clock.schedule_once(
-                    lambda dt: root._send_active_playlist_to_service(), 0
-                )
-        with contextlib.suppress(Exception):
-            if getattr(root, "get_update_slider", None):
-                root.get_update_slider.cancel()
-        with contextlib.suppress(Exception):
-            root.get_update_slider = Clock.schedule_interval(root.wait_update_slider, 1)
+            root.ids.song_position.opacity = 0
+            root.ids.song_max.opacity = 0
 
-        def _apply_playing_state():
-            with contextlib.suppress(Exception):
-                if GUILayout.slider is not None:
-                    GUILayout.slider.disabled = False
-                    GUILayout.slider.opacity = 1
-            with contextlib.suppress(Exception):
-                if hasattr(root.ids, "next_btt"):
-                    root.ids.next_btt.disabled = False
-                    root.ids.next_btt.opacity = 1
-                if hasattr(root.ids, "previous_btt"):
-                    root.ids.previous_btt.disabled = False
-                    root.ids.previous_btt.opacity = 1
-            if getattr(root, "set_gui_conditions", None):
-                with contextlib.suppress(Exception):
-                    root.set_gui_conditions(0, True, False, 1)
-            elif getattr(root, "set_gui_from_check", None):
-                with contextlib.suppress(Exception):
-                    root.set_gui_from_check(0)
+        with contextlib.suppress(Exception):
+            GUILayout.send("iamawake", "hello")
 
-        def _apply_no_track_state():
+        def _stop_all():
             with contextlib.suppress(Exception):
-                if GUILayout.slider is not None:
-                    GUILayout.slider.disabled = True
-                    GUILayout.slider.opacity = 0
+                ev = getattr(root, "get_update_slider", None)
+                if ev and hasattr(ev, "cancel"):
+                    ev.cancel()
+            with contextlib.suppress(Exception):
+                if hasattr(root.ids, "play_btt"):
+                    root.ids.play_btt.opacity = 1
+                    root.ids.play_btt.disabled = False
+                if hasattr(root.ids, "pause_btt"):
+                    root.ids.pause_btt.opacity = 0
+                    root.ids.pause_btt.disabled = True
+
+        def _apply_idle_state():
+            _stop_all()
             with contextlib.suppress(Exception):
                 if hasattr(root.ids, "next_btt"):
                     root.ids.next_btt.disabled = True
@@ -1836,11 +1817,12 @@ class Musicapp(MDApp):
                     root.ids.previous_btt.disabled = True
                     root.ids.previous_btt.opacity = 0
             with contextlib.suppress(Exception):
-                root.set_gui_conditions_from_none()
+                if getattr(root, "set_gui_conditions_from_none", None):
+                    root.set_gui_conditions_from_none()
 
-        def _apply_paused_state():
+        def _apply_playing_state():
             with contextlib.suppress(Exception):
-                if GUILayout.slider is not None:
+                if getattr(GUILayout, "slider", None) is not None:
                     GUILayout.slider.disabled = False
                     GUILayout.slider.opacity = 1
             with contextlib.suppress(Exception):
@@ -1850,8 +1832,24 @@ class Musicapp(MDApp):
                 if hasattr(root.ids, "previous_btt"):
                     root.ids.previous_btt.disabled = False
                     root.ids.previous_btt.opacity = 1
-            if getattr(root, "set_gui_conditions", None):
-                with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):
+                if getattr(root, "set_gui_conditions", None):
+                    root.set_gui_conditions(0, True, False, 1)
+
+        def _apply_paused_state():
+            with contextlib.suppress(Exception):
+                if getattr(GUILayout, "slider", None) is not None:
+                    GUILayout.slider.disabled = False
+                    GUILayout.slider.opacity = 1
+            with contextlib.suppress(Exception):
+                if hasattr(root.ids, "next_btt"):
+                    root.ids.next_btt.disabled = False
+                    root.ids.next_btt.opacity = 1
+                if hasattr(root.ids, "previous_btt"):
+                    root.ids.previous_btt.disabled = False
+                    root.ids.previous_btt.opacity = 1
+            with contextlib.suppress(Exception):
+                if getattr(root, "set_gui_conditions", None):
                     root.set_gui_conditions(1, False, True, 0)
 
         poll_ev = {"ev": None}
@@ -1860,27 +1858,36 @@ class Musicapp(MDApp):
         def _poll(dt):
             paused = getattr(GUILayout, "check_are_paused", "None")
             if paused == "False":
-                _stop_all()
+                if poll_ev["ev"]:
+                    with contextlib.suppress(Exception):
+                        poll_ev["ev"].cancel()
+                if timeout_ev["ev"]:
+                    with contextlib.suppress(Exception):
+                        timeout_ev["ev"].cancel()
                 _apply_playing_state()
+                return
             elif paused == "True":
-                _stop_all()
+                if poll_ev["ev"]:
+                    with contextlib.suppress(Exception):
+                        poll_ev["ev"].cancel()
+                if timeout_ev["ev"]:
+                    with contextlib.suppress(Exception):
+                        timeout_ev["ev"].cancel()
                 _apply_paused_state()
-            else:
                 return
 
-        def _stop_all():
-            with contextlib.suppress(Exception):
-                Clock.unschedule(poll_ev["ev"])
-            with contextlib.suppress(Exception):
-                Clock.unschedule(timeout_ev["ev"])
+        poll_ev["ev"] = Clock.schedule_interval(_poll, 0.1)
 
         def _timeout(dt):
-            _stop_all()
-            _apply_no_track_state()
+            if poll_ev["ev"]:
+                with contextlib.suppress(Exception):
+                    poll_ev["ev"].cancel()
+            _apply_idle_state()
 
-        poll_ev["ev"] = Clock.schedule_interval(_poll, 0.25)
-        timeout_ev["ev"] = Clock.schedule_once(_timeout, 5.0)
-        Clock.schedule_once(lambda dt: Window.canvas.ask_update(), 0)
+        timeout_ev["ev"] = Clock.schedule_once(_timeout, 1.2)
+
+        with contextlib.suppress(Exception):
+            Window.canvas.ask_update()
 
 
 if __name__ == "__main__":
