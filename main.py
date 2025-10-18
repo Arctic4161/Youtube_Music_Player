@@ -279,6 +279,8 @@ class MySlider(MDSlider):
         app.root.ids.play_btt.opacity = 0
         app.root.ids.pause_btt.disabled = False
         app.root.ids.pause_btt.opacity = 1
+        root.ids.song_position.opacity = 1
+        root.ids.song_max.opacity = 1
 
 
 class GUILayout(MDFloatLayout, MDGridLayout):
@@ -711,6 +713,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self._playlist_manager = PlaylistManager(storage_path=storage)
         self.refresh_playlist()
 
+    @mainthread
     def _controls(self, action: str, *args):
         if action != "enable_play":
             return
@@ -720,7 +723,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         ids.pause_btt.disabled = True
         ids.pause_btt.opacity = 0
         ids.next_btt.disabled = False
-        ids.prev_btt.disabled = False
+        ids.previous_btt.disabled = False
         ids.song_pos_lbl.opacity = 0
         ids.song_max_lbl.opacity = 0
 
@@ -1279,6 +1282,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.make_slider()
         self.playing()
 
+    @mainthread
     def update_image(self, *val):
         raw = "".join(val).strip()
         if raw.startswith("['") and raw.endswith("']"):
@@ -1462,6 +1466,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.paused = False
         self.file_loaded = False
 
+    @mainthread
     def download_yt(self):
         MDApp.get_running_app().root.ids.next_btt.disabled = True
         MDApp.get_running_app().root.ids.previous_btt.disabled = True
@@ -1471,6 +1476,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         )
         GUILayout.send("downloadyt", payload)
 
+    @mainthread
     def file_is_downloaded(self, *val):
         maybe = "".join(val)
         if maybe == "nope":
@@ -1478,6 +1484,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         elif maybe == "yep":
             self.sync_playlist_set_load()
 
+    @mainthread
     def update_info(self, *val):
         msg = "".join(val)
         MDApp.get_running_app().root.ids.info.text = (
@@ -1602,6 +1609,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def load_file(self):
         GUILayout.send("load", self.stream)
 
+    @mainthread
     def set_slider(self, *val):
         self.length = float("".join(val))
         GUILayout.slider.max = self.length
@@ -1616,6 +1624,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
         self.fileosc_loaded = True
 
+    @mainthread
     def update_slider(self, *val):
         self.song_pos = float("".join(val))
         if not getattr(GUILayout, "is_scrubbing", False):
@@ -1676,6 +1685,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.play_btt.opacity = 1
         MDApp.get_running_app().root.ids.pause_btt.opacity = 0
 
+    @mainthread
     def reset_gui(self, *val):
         GUILayout.playing_song = False
         with contextlib.suppress(Exception):
@@ -1783,42 +1793,28 @@ class Musicapp(MDApp):
         """Run on the main thread: safely re-sync UI with playback state."""
         root = self.root
 
+        GUILayout.send("iamawake", "hello")
+
         with contextlib.suppress(Exception):
-            if getattr(GUILayout, "slider", None) is not None:
+            if GUILayout.slider is not None:
                 GUILayout.slider.disabled = True
-                GUILayout.slider.opacity = 0
         with contextlib.suppress(Exception):
-            root.ids.song_position.opacity = 0
-            root.ids.song_max.opacity = 0
-
+            if hasattr(root.ids, "next_btt"):
+                root.ids.next_btt.disabled = True
+            if hasattr(root.ids, "previous_btt"):
+                root.ids.previous_btt.disabled = True
         with contextlib.suppress(Exception):
-            GUILayout.send("iamawake", "hello")
-
-        def _stop_all():
-            with contextlib.suppress(Exception):
-                ev = getattr(root, "get_update_slider", None)
-                if ev and hasattr(ev, "cancel"):
-                    ev.cancel()
-            with contextlib.suppress(Exception):
-                if hasattr(root.ids, "play_btt"):
-                    root.ids.play_btt.opacity = 1
-                    root.ids.play_btt.disabled = False
-                if hasattr(root.ids, "pause_btt"):
-                    root.ids.pause_btt.opacity = 0
-                    root.ids.pause_btt.disabled = True
-
-        def _apply_idle_state():
-            _stop_all()
-            with contextlib.suppress(Exception):
-                if hasattr(root.ids, "next_btt"):
-                    root.ids.next_btt.disabled = True
-                    root.ids.next_btt.opacity = 0
-                if hasattr(root.ids, "previous_btt"):
-                    root.ids.previous_btt.disabled = True
-                    root.ids.previous_btt.opacity = 0
-            with contextlib.suppress(Exception):
-                if getattr(root, "set_gui_conditions_from_none", None):
-                    root.set_gui_conditions_from_none()
+            if getattr(root, "refresh_playlist", None):
+                Clock.schedule_once(lambda dt: root.refresh_playlist(), 0)
+            if getattr(root, "_send_active_playlist_to_service", None):
+                Clock.schedule_once(
+                    lambda dt: root._send_active_playlist_to_service(), 0
+                )
+        with contextlib.suppress(Exception):
+            if getattr(root, "get_update_slider", None):
+                root.get_update_slider.cancel()
+        with contextlib.suppress(Exception):
+            root.get_update_slider = Clock.schedule_interval(root.wait_update_slider, 1)
 
         def _apply_playing_state():
             with contextlib.suppress(Exception):
@@ -1833,12 +1829,36 @@ class Musicapp(MDApp):
                     root.ids.previous_btt.disabled = False
                     root.ids.previous_btt.opacity = 1
             with contextlib.suppress(Exception):
-                if getattr(root, "set_gui_conditions", None):
+                if hasattr(root.ids, "song_position"):
+                    root.ids.song_position.opacity = 1
+                if hasattr(root.ids, "song_max"):
+                    root.ids.song_max.opacity = 1
+
+            if getattr(root, "set_gui_conditions", None):
+                with contextlib.suppress(Exception):
                     root.set_gui_conditions(0, True, False, 1)
+            elif getattr(root, "set_gui_from_check", None):
+                with contextlib.suppress(Exception):
+                    root.set_gui_from_check(0)
+
+        def _apply_no_track_state():
+            with contextlib.suppress(Exception):
+                if GUILayout.slider is not None:
+                    GUILayout.slider.disabled = True
+                    GUILayout.slider.opacity = 0
+            with contextlib.suppress(Exception):
+                if hasattr(root.ids, "next_btt"):
+                    root.ids.next_btt.disabled = True
+                    root.ids.next_btt.opacity = 0
+                if hasattr(root.ids, "previous_btt"):
+                    root.ids.previous_btt.disabled = True
+                    root.ids.previous_btt.opacity = 0
+            with contextlib.suppress(Exception):
+                root.set_gui_conditions_from_none()
 
         def _apply_paused_state():
             with contextlib.suppress(Exception):
-                if getattr(GUILayout, "slider", None) is not None:
+                if GUILayout.slider is not None:
                     GUILayout.slider.disabled = False
                     GUILayout.slider.opacity = 1
             with contextlib.suppress(Exception):
@@ -1849,7 +1869,13 @@ class Musicapp(MDApp):
                     root.ids.previous_btt.disabled = False
                     root.ids.previous_btt.opacity = 1
             with contextlib.suppress(Exception):
-                if getattr(root, "set_gui_conditions", None):
+                if hasattr(root.ids, "song_position"):
+                    root.ids.song_position.opacity = 1
+                if hasattr(root.ids, "song_max"):
+                    root.ids.song_max.opacity = 1
+
+            if getattr(root, "set_gui_conditions", None):
+                with contextlib.suppress(Exception):
                     root.set_gui_conditions(1, False, True, 0)
 
         poll_ev = {"ev": None}
@@ -1858,36 +1884,27 @@ class Musicapp(MDApp):
         def _poll(dt):
             paused = getattr(GUILayout, "check_are_paused", "None")
             if paused == "False":
-                if poll_ev["ev"]:
-                    with contextlib.suppress(Exception):
-                        poll_ev["ev"].cancel()
-                if timeout_ev["ev"]:
-                    with contextlib.suppress(Exception):
-                        timeout_ev["ev"].cancel()
+                _stop_all()
                 _apply_playing_state()
-                return
             elif paused == "True":
-                if poll_ev["ev"]:
-                    with contextlib.suppress(Exception):
-                        poll_ev["ev"].cancel()
-                if timeout_ev["ev"]:
-                    with contextlib.suppress(Exception):
-                        timeout_ev["ev"].cancel()
+                _stop_all()
                 _apply_paused_state()
+            else:
                 return
 
-        poll_ev["ev"] = Clock.schedule_interval(_poll, 0.1)
+        def _stop_all():
+            with contextlib.suppress(Exception):
+                Clock.unschedule(poll_ev["ev"])
+            with contextlib.suppress(Exception):
+                Clock.unschedule(timeout_ev["ev"])
 
         def _timeout(dt):
-            if poll_ev["ev"]:
-                with contextlib.suppress(Exception):
-                    poll_ev["ev"].cancel()
-            _apply_idle_state()
+            _stop_all()
+            _apply_no_track_state()
 
-        timeout_ev["ev"] = Clock.schedule_once(_timeout, 1.2)
-
-        with contextlib.suppress(Exception):
-            Window.canvas.ask_update()
+        poll_ev["ev"] = Clock.schedule_interval(_poll, 0.25)
+        timeout_ev["ev"] = Clock.schedule_once(_timeout, 10.0)
+        Clock.schedule_once(lambda dt: Window.canvas.ask_update(), 0)
 
 
 if __name__ == "__main__":
