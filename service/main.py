@@ -279,7 +279,7 @@ class Gui_sounds:
                 elif Gui_sounds.main_paused and Gui_sounds.sound is not None:
                     if Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1:
                         Gui_sounds.next()
-                time.sleep(1)
+                _time.sleep(1)
             except Exception as e:
                 print("Next-monitor loop error:", e)
             self._next_thread_stop.wait(0.25)
@@ -749,4 +749,4 @@ if __name__ == "__main__":
     SERVER.bind("/iampaused", GS.pause_val)
     SERVER.bind("/seek_seconds", GS.seek_seconds)
     while True:
-        time.sleep(1)
+        _time.sleep(1)
