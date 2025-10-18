@@ -24,9 +24,9 @@ else:
 from kivy.config import Config
 
 if utils.get_platform() == "android":
-    Config.set("input", "mouse", "")
-    Config.set("input", "mtdev", "")
-    Config.set("input", "hid_input", "")
+    Config.set("input", "mtdev_%(name)s", "probesysfs,provider=mtdev")
+    Config.set("input", "hid_%(name)s", "probesysfs,provider=hidinput")
+    Config.set('postproc', 'double_tap_distance', '20')
 else:
     Config.set("input", "mouse", "mouse,disable_multitouch")
 
@@ -148,17 +148,13 @@ class PlaylistTrackRow(MDBoxLayout):
         if not self.collide_point(*touch.pos):
             return super().on_touch_down(touch)
 
-        d = self.ids.get("delete_btn")
-        if d:
-            try:
+        if d := self.ids.get("delete_btn"):
+            with contextlib.suppress(Exception):
                 x1, y1 = d.to_window(0, 0)
                 x2, y2 = x1 + d.width, y1 + d.height
                 tx, ty = touch.pos
                 if x1 <= tx <= x2 and y1 <= ty <= y2:
                     return super().on_touch_down(touch)
-            except Exception:
-                pass
-
         self._dragging = False
         self._moved = False
         self._down_pos = touch.pos
@@ -724,8 +720,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         ids.pause_btt.opacity = 0
         ids.next_btt.disabled = False
         ids.previous_btt.disabled = False
-        ids.song_pos_lbl.opacity = 0
-        ids.song_max_lbl.opacity = 0
+        ids.song_pos_lbl.opacity = 1
+        ids.song_max_lbl.opacity = 1
 
     def _playlist_refresh_sidebar(self):
         if not getattr(self, "library_tab", None):
@@ -1488,7 +1484,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def update_info(self, *val):
         msg = "".join(val)
         MDApp.get_running_app().root.ids.info.text = (
-            "Downloading audio... Please wait\n" f"{msg[11:]}"
+            "Downloading audio... Please wait\n" f"{msg}"
         )
 
     def checkfile(self):
@@ -1687,7 +1683,15 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     @mainthread
     def reset_gui(self, *val):
+        """Reset GUI to a clean idle state when the last track finishes."""
+        self.gui_reset = True
+        self.paused = False
+        self.playlist = False
         GUILayout.playing_song = False
+
+        with contextlib.suppress(Exception):
+            GUILayout.get_update_slider.cancel()
+
         with contextlib.suppress(Exception):
             self._reset_to_startup_gui()
         Clock.schedule_once(lambda dt: self._reset_to_startup_gui(), 0)
@@ -1833,13 +1837,8 @@ class Musicapp(MDApp):
                     root.ids.song_position.opacity = 1
                 if hasattr(root.ids, "song_max"):
                     root.ids.song_max.opacity = 1
-
-            if getattr(root, "set_gui_conditions", None):
-                with contextlib.suppress(Exception):
-                    root.set_gui_conditions(0, True, False, 1)
-            elif getattr(root, "set_gui_from_check", None):
-                with contextlib.suppress(Exception):
-                    root.set_gui_from_check(0)
+            GUILayout.check_are_paused = "False"
+            root.set_gui_from_check(0)
 
         def _apply_no_track_state():
             with contextlib.suppress(Exception):
@@ -1874,9 +1873,8 @@ class Musicapp(MDApp):
                 if hasattr(root.ids, "song_max"):
                     root.ids.song_max.opacity = 1
 
-            if getattr(root, "set_gui_conditions", None):
-                with contextlib.suppress(Exception):
-                    root.set_gui_conditions(1, False, True, 0)
+            GUILayout.check_are_paused = "True"
+            root.set_gui_from_check(0)
 
         poll_ev = {"ev": None}
         timeout_ev = {"ev": None}
