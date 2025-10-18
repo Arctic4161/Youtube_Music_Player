@@ -7,7 +7,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
-from utils import get_app_writable_dir
+from utils import get_app_writable_dir, safe_filename
 
 DEFAULT_REL_SUBDIR = "Downloaded/Played"
 PLAYLIST_FILENAME = "playlists.json"
@@ -76,7 +76,6 @@ class PlaylistManager:
         Load playlists and rebuild absolute media/cover paths from the current
         app sandbox ('Downloaded/Played') if stored paths are relative.
         """
-        import os
         root = get_app_writable_dir("Downloaded/Played")
 
         if os.path.exists(self.storage_path):
@@ -103,7 +102,7 @@ class PlaylistManager:
 
                 name = t.get("title") or os.path.splitext(os.path.basename(raw_path))[0]
                 if (os.sep in name) or name.lower().endswith(
-                        (".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg")
+                    (".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg")
                 ):
                     name = os.path.splitext(os.path.basename(name))[0]
 
@@ -150,7 +149,6 @@ class PlaylistManager:
         (when they live under the current sandbox), so they remain valid
         across reinstalls/updates that change the sandbox root.
         """
-        import os
         root = get_app_writable_dir("Downloaded/Played")
         root_norm = os.path.normcase(os.path.normpath(root))
 
@@ -159,7 +157,10 @@ class PlaylistManager:
                 return pth
             try:
                 np = os.path.normpath(pth)
-                if os.path.normcase(np).startswith(root_norm + os.sep) or os.path.normcase(np) == root_norm:
+                if (
+                    os.path.normcase(np).startswith(root_norm + os.sep)
+                    or os.path.normcase(np) == root_norm
+                ):
                     return os.path.relpath(np, root)
                 return pth
             except Exception:
@@ -234,10 +235,6 @@ class PlaylistManager:
         p = self._find(pid)
         if not p:
             return
-
-        import os
-        from utils import safe_filename, get_app_writable_dir
-
         root = get_app_writable_dir("Downloaded/Played")
         root_norm = os.path.normcase(os.path.normpath(root))
 
@@ -257,7 +254,9 @@ class PlaylistManager:
             except Exception:
                 return pth
 
-        existing = {_norm(getattr(t, "path", "")) for t in p.tracks if getattr(t, "path", "")}
+        existing = {
+            _norm(getattr(t, "path", "")) for t in p.tracks if getattr(t, "path", "")
+        }
         seen_batch = set()
         added_any = False
 

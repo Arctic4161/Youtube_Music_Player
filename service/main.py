@@ -1,8 +1,9 @@
 import contextlib
+import os
 import os.path
 import random
 import threading
-import time
+import time as _time
 
 import requests
 import yt_dlp
@@ -32,22 +33,22 @@ CLIENT = OSCClient("localhost", 3002, encoding="utf-8")
 def request_audio_focus_plain(ctx):
     """Request permanent media focus while playing (no listener)."""
     global _AUDIO_FOCUS_REQ
-    AudioManager = autoclass('android.media.AudioManager')
-    AudioAttributes = autoclass('android.media.AudioAttributes')
-    AttrBuilder = autoclass('android.media.AudioAttributes$Builder')
-    AudioFocusRequest = autoclass('android.media.AudioFocusRequest')
-    AFRBuilder = autoclass('android.media.AudioFocusRequest$Builder')
+    AudioManager = autoclass("android.media.AudioManager")
+    AudioAttributes = autoclass("android.media.AudioAttributes")
+    AttrBuilder = autoclass("android.media.AudioAttributes$Builder")
+    AudioFocusRequest = autoclass("android.media.AudioFocusRequest")
+    AFRBuilder = autoclass("android.media.AudioFocusRequest$Builder")
 
-    attrs = (AttrBuilder()
-             .setUsage(AudioAttributes.USAGE_MEDIA)
-             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-             .build())
+    attrs = (
+        AttrBuilder()
+        .setUsage(AudioAttributes.USAGE_MEDIA)
+        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+        .build()
+    )
 
-    afr = (AFRBuilder(AudioManager.AUDIOFOCUS_GAIN)
-           .setAudioAttributes(attrs)
-           .build())
+    afr = AFRBuilder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(attrs).build()
 
-    am = cast('android.media.AudioManager', ctx.getSystemService(ctx.AUDIO_SERVICE))
+    am = cast("android.media.AudioManager", ctx.getSystemService(ctx.AUDIO_SERVICE))
     ok = False
     try:
         ok = am.requestAudioFocus(afr) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
@@ -63,8 +64,8 @@ def abandon_audio_focus(ctx):
     global _AUDIO_FOCUS_REQ
     if not _AUDIO_FOCUS_REQ:
         return
-    AudioManager = autoclass('android.media.AudioManager')
-    am = cast('android.media.AudioManager', ctx.getSystemService(ctx.AUDIO_SERVICE))
+    AudioManager = autoclass("android.media.AudioManager")
+    am = cast("android.media.AudioManager", ctx.getSystemService(ctx.AUDIO_SERVICE))
     with contextlib.suppress(Exception):
         am.abandonAudioFocusRequest(_AUDIO_FOCUS_REQ)
     _AUDIO_FOCUS_REQ = None
@@ -73,11 +74,11 @@ def abandon_audio_focus(ctx):
 def wait_for_service_ctx(timeout_s: float = 6.0):
     PythonService = autoclass("org.kivy.android.PythonService")
     autoclass("org.jnius.NativeInvocationHandler")
-    t0 = time.time()
-    while time.time() - t0 < timeout_s:
+    t0 = _time.time()
+    while _time.time() - t0 < timeout_s:
         if svc := PythonService.mService:
             return svc.getApplicationContext(), svc
-        time.sleep(0.05)
+        _time.sleep(0.05)
     return None, None
 
 
@@ -85,7 +86,10 @@ def ensure_foreground(ctx, svc):
     NotificationManager = autoclass("android.app.NotificationManager")
     NotificationChannel = autoclass("android.app.NotificationChannel")
     channel_id = "music_fg"
-    nm = cast("android.app.NotificationManager", ctx.getSystemService(ctx.NOTIFICATION_SERVICE))
+    nm = cast(
+        "android.app.NotificationManager",
+        ctx.getSystemService(ctx.NOTIFICATION_SERVICE),
+    )
     ch = NotificationChannel(channel_id, "Playback", NotificationManager.IMPORTANCE_LOW)
     nm.createNotificationChannel(ch)
 
@@ -153,10 +157,10 @@ def release_wakelock():
 
 
 def embed_cover_art_m4a_jpeg(
-        m4a_path: str,
-        jpeg_bytes: bytes,
-        title: str | None = None,
-        artist: str | None = None,
+    m4a_path: str,
+    jpeg_bytes: bytes,
+    title: str | None = None,
+    artist: str | None = None,
 ) -> bool:
     try:
         audio = MP4(m4a_path)
@@ -178,9 +182,6 @@ def _resolve_cover_for_audio(audio_path: str) -> str | None:
     - <sandbox>/Downloaded/Played/Foo.jpg
     - <old_dir>/Foo.jpg    (if still present)
     """
-    import os
-    from utils import get_app_writable_dir
-
     name, _ = os.path.splitext(os.path.basename(audio_path))
     cand = os.path.join(get_app_writable_dir("Downloaded/Played"), f"{name}.jpg")
     if os.path.exists(cand):
@@ -234,7 +235,7 @@ class Gui_sounds:
         super().__init__(*args, **kwargs)
         self._next_thread = None
         self._next_thread_stop = threading.Event()
-        if utils.get_platform() == 'android':
+        if utils.get_platform() == "android":
             self.PlaybackState = autoclass("android.media.session.PlaybackState")
             self.B = autoclass("android.media.session.PlaybackState$Builder")
 
@@ -264,9 +265,9 @@ class Gui_sounds:
         while not self._next_thread_stop.is_set():
             try:
                 if (
-                        Gui_sounds.sound is not None
-                        and (Gui_sounds.paused is False or Gui_sounds.sound.state == "play")
-                        and Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1
+                    Gui_sounds.sound is not None
+                    and (Gui_sounds.paused is False or Gui_sounds.sound.state == "play")
+                    and Gui_sounds.length - Gui_sounds.sound.get_pos() <= 1
                 ):
                     if Gui_sounds.previous is True or Gui_sounds.sound.loop is True:
                         continue
@@ -299,7 +300,9 @@ class Gui_sounds:
         base_dir = Gui_sounds.set_local_download
         candidate = os.path.join(base_dir, os.path.basename(Gui_sounds.file_to_load))
 
-        path_to_try = candidate if os.path.isfile(candidate) else Gui_sounds.file_to_load
+        path_to_try = (
+            candidate if os.path.isfile(candidate) else Gui_sounds.file_to_load
+        )
 
         if not os.path.isfile(path_to_try):
             name, ext = os.path.splitext(os.path.basename(path_to_try))
@@ -312,7 +315,9 @@ class Gui_sounds:
 
         if not os.path.isfile(path_to_try):
             with contextlib.suppress(Exception):
-                Gui_sounds.send("song_not_found", os.path.basename(Gui_sounds.file_to_load))
+                Gui_sounds.send(
+                    "song_not_found", os.path.basename(Gui_sounds.file_to_load)
+                )
             Gui_sounds.send("reset_gui", "reset_gui")
             return
 
@@ -408,7 +413,9 @@ class Gui_sounds:
             if ctx:
                 request_audio_focus_plain(ctx)
             if "_SESSION" in globals():
-                state = self.B().setState(self.PlaybackState.STATE_PLAYING, 0, 1.0).build()
+                state = (
+                    self.B().setState(self.PlaybackState.STATE_PLAYING, 0, 1.0).build()
+                )
                 _SESSION.setPlaybackState(state)
         if Gui_sounds.song_local and Gui_sounds.song_local[0] > 0:
             Gui_sounds.check_for_pause()
@@ -482,8 +489,6 @@ class Gui_sounds:
             Gui_sounds.song_local = None
 
             if just_started:
-                import time as _time
-
                 _time.sleep(0.05)
 
             with contextlib.suppress(Exception):
@@ -506,7 +511,9 @@ class Gui_sounds:
             if ctx:
                 abandon_audio_focus(ctx)
             if "_SESSION" in globals():
-                state = self.B().setState(self.PlaybackState.STATE_PAUSED, 0, 0.0).build()
+                state = (
+                    self.B().setState(self.PlaybackState.STATE_PAUSED, 0, 0.0).build()
+                )
                 _SESSION.setPlaybackState(state)
 
     def pause_val(self, *val):
@@ -547,7 +554,7 @@ class Gui_sounds:
     def check_song_change(arg0):
         Gui_sounds.song_change = arg0
         if Gui_sounds.song_change is True and (
-                Gui_sounds.sound is not None and Gui_sounds.sound.state == "play"
+            Gui_sounds.sound is not None and Gui_sounds.sound.state == "play"
         ):
             GS.stop()
         Gui_sounds.retrieving_song()
@@ -570,9 +577,9 @@ class Gui_sounds:
                         current = None
 
                     need_rebuild = (
-                            (not Gui_sounds.shuffle_bag)
-                            or (Gui_sounds._bag_source_len != len(songs))
-                            or any(item not in songs for item in Gui_sounds.shuffle_bag)
+                        (not Gui_sounds.shuffle_bag)
+                        or (Gui_sounds._bag_source_len != len(songs))
+                        or any(item not in songs for item in Gui_sounds.shuffle_bag)
                     )
                     if need_rebuild:
                         Gui_sounds._rebuild_shuffle_bag(

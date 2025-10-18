@@ -21,12 +21,15 @@ else:
         ]
     )
 from kivy.config import Config
-if utils.get_platform() == 'android':
-    Config.set('input', 'mouse', '')
-    Config.set('input', 'mtdev', '')
-    Config.set('input', 'hid_input', '')
+
+if utils.get_platform() == "android":
+    Config.set("input", "mouse", "")
+    Config.set("input", "mtdev", "")
+    Config.set("input", "hid_input", "")
 else:
-    Config.set('input', 'mouse', 'mouse,disable_multitouch')
+    from threading import Thread
+
+    Config.set("input", "mouse", "mouse,disable_multitouch")
 from kivy.graphics import Color, Rectangle
 from kivy.storage.jsonstore import JsonStore
 from kivy.uix.widget import Widget
@@ -35,8 +38,6 @@ kivy_home = get_app_writable_dir("Downloaded")
 os.makedirs(kivy_home, exist_ok=True)
 os.environ["KIVY_HOME"] = kivy_home
 os.environ["KIVY_NO_CONSOLELOG"] = "1"
-
-from threading import Thread
 
 from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
@@ -96,7 +97,6 @@ class PlaylistTrackRow(MDBoxLayout):
 
     def _cancel_longpress(self):
         if self._lp_ev is not None:
-            from kivy.clock import Clock
 
             with contextlib.suppress(Exception):
                 Clock.unschedule(self._lp_ev)
@@ -165,8 +165,6 @@ class PlaylistTrackRow(MDBoxLayout):
         self._longpress_fired = False
         self._pending_touch = touch
 
-        from kivy.clock import Clock
-
         self._cancel_longpress()
         self._lp_ev = Clock.schedule_once(
             self._fire_longpress, float(self.LONG_PRESS_S)
@@ -220,7 +218,6 @@ class PlaylistTrackRow(MDBoxLayout):
                     MDApp.get_running_app().root._playlist_end_drag(touch)
                 return True
             return True
-
 
         if self.collide_point(*touch.pos) and not self._moved:
             if d := self.ids.get("delete_btn"):
@@ -371,12 +368,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if not rows:
             return
 
-        target = next((r for r in rows if int(getattr(r, "index", -1)) == int(index)), rows[-1])
+        target = next(
+            (r for r in rows if int(getattr(r, "index", -1)) == int(index)), rows[-1]
+        )
         parent = target.parent
         if not parent:
             return
-
-        from kivy.metrics import dp
 
         thickness = max(2, int(dp(2)))
         ind = self._ensure_indicator_in(parent)
@@ -509,7 +506,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.set_gui_conditions_from_none()
         elif GUILayout.check_are_paused == "True":
             self.set_gui_conditions(1, False, True, 0)
-
 
     @mainthread
     def _reset_to_startup_gui(self):
@@ -1166,7 +1162,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                     ),
                 ),
                 MDFlatButton(
-                    text="Yes", on_release=lambda *_: self.remove_track(message) or self._current_dialog.dismiss(),
+                    text="Yes",
+                    on_release=lambda *_: self.remove_track(message)
+                    or self._current_dialog.dismiss(),
                 ),
             ],
         )
@@ -1207,7 +1205,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 target = os.path.normpath(os.path.realpath(track_path))
                 remove_index = None
                 for idx, t in enumerate(list(ap.tracks) if ap.tracks else []):
-                    p = getattr(t, "path", None) or (t.get("path") if isinstance(t, dict) else None)
+                    p = getattr(t, "path", None) or (
+                        t.get("path") if isinstance(t, dict) else None
+                    )
                     if not p:
                         continue
                     rp = os.path.normpath(os.path.realpath(p))
@@ -1790,7 +1790,6 @@ class Musicapp(MDApp):
                 root.get_update_slider.cancel()
         with contextlib.suppress(Exception):
             root.get_update_slider = Clock.schedule_interval(root.wait_update_slider, 1)
-
 
         def _apply_playing_state():
             with contextlib.suppress(Exception):
