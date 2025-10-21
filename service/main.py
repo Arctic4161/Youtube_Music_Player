@@ -377,6 +377,21 @@ class Gui_sounds:
         audio_path = os.path.join(set_local_download, f"{safe_title}.m4a")
         cover_path = os.path.join(set_local_download, f"{safe_title}.jpg")
 
+        from urllib.parse import urlparse
+
+        def origin_of(u: str) -> str:
+            p = urlparse(u)
+            return f"{p.scheme}://{p.netloc}"
+
+        page_url = setytlink
+
+        common_headers = {
+            "User-Agent": 'Mozilla/5.0 (Windows NT 10.0; rv:135.0) Gecko/20100101 Firefox/135.0',
+            "Referer": page_url,
+            "Origin": origin_of(page_url),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
         ydl_opts = {
             "outtmpl": {"default": audio_path},
             "proxies": {"all": "socks5://154.38.180.176:443"},
@@ -389,7 +404,9 @@ class Gui_sounds:
             "forceipv4": True,
             "nocheckcertificate": True,
             "logger": CustomLogger(),
-            "headers":{'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; rv:135.0) Gecko/20100101 Firefox/135.0'}
+            "user_agent": common_headers["User-Agent"],
+            "referer": common_headers["Referer"],
+            "http_headers": common_headers,
         }
 
         try:
