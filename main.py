@@ -154,7 +154,6 @@ class MySlider(MDSlider):
         return super().on_touch_down(touch)
 
     def on_touch_move(self, touch):
-        print("here")
         if self.collide_point(*touch.pos) and "down_pos" in touch.ud:
             x0, y0 = touch.ud["down_pos"]
             dx = touch.x - x0
