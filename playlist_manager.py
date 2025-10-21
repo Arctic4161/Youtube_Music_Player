@@ -194,8 +194,7 @@ class PlaylistManager:
 
     def active_playlist(self) -> Optional[Playlist]:
         pid = self.data.get("active_playlist_id")
-        p = self._find(pid) if pid else None
-        return p if (p and p.tracks) else None
+        return self._find(pid) if pid else None
 
     def set_active(self, pid: str) -> None:
         if self._find(pid):

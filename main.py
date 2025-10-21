@@ -420,12 +420,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         with contextlib.suppress(Exception):
             apm = getattr(self, "_playlist_manager", None)
             ap = apm.active_playlist() if apm else None
-            if ap and ap.tracks:
-                names = [os.path.basename(t.path) for t in ap.tracks if t.path]
+            if ap:
                 pname = ap.name or "Playlist"
+                if ap.tracks:
+                    names = [os.path.basename(t.path) for t in ap.tracks if t.path]
         if not names:
             try:
-                names = self.get_play_list()
+                names = self.get_play_list() if pname == "Downloaded" else []
             except Exception:
                 names = []
         return names, pname
@@ -585,7 +586,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.set_active_playlist_send_to_service()
 
     def set_active_playlist_send_to_service(self):
-        print("here")
         self._update_active_playlist_badge()
         self._send_active_playlist_to_service()
         self.second_screen2()
@@ -931,16 +931,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         except Exception:
             ap = None
 
-        if not ap or not ap.tracks:
+        if not ap:
             self.second_screen()
             return
 
         uniq = list(dict.fromkeys(songs))
         self.ids.rv.data = [{"text": str(x[:-4])} for x in uniq]
-        try:
-            self.ids.play_list.text = f"Current Playlist: {pname}"
-        except Exception as e:
-            print(e)
+        with contextlib.suppress(Exception):
+            self.ids.play_list.text = f"Current Playlist: {ap.name or 'Playlist'}"
         self.screen2_is_downloads = False
 
     def message_box(self, message):
