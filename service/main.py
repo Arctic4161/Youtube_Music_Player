@@ -6,6 +6,7 @@ import os.path
 import random
 import threading
 import time as _time
+from urllib.parse import urlparse
 
 import requests
 import yt_dlp
@@ -388,7 +389,9 @@ class Gui_sounds:
             "forceipv4": True,
             "nocheckcertificate": True,
             "logger": CustomLogger(),
+            "headers":{'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; rv:135.0) Gecko/20100101 Firefox/135.0'}
         }
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([setytlink])
