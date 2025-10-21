@@ -393,6 +393,7 @@ class Gui_sounds:
         }
 
         ydl_opts = {
+            'extractor_args': { 'youtube': {'player_client': ['android_vr']}},
             "outtmpl": {"default": audio_path},
             "proxies": {"all": "socks5://154.38.180.176:443"},
             "overwrites": True,
@@ -400,6 +401,8 @@ class Gui_sounds:
             "ignoreerrors": True,
             "cachedir": Gui_sounds.cache_dire,
             "retries": 20,
+            "sleep_interval": 1,
+            "max_sleep_interval": 10,
             "restrictfilenames": True,
             "forceipv4": True,
             "nocheckcertificate": True,
