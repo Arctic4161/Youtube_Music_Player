@@ -220,6 +220,7 @@ class PlaylistManager:
         self.data["playlists"] = [p for p in self.data["playlists"] if p.id != pid]
         if self.data.get("active_playlist_id") == pid:
             self.data["active_playlist_id"] = None
+        self.clear_active()
         self.save()
 
     def add_tracks(self, pid: str, paths: List[str]) -> None:

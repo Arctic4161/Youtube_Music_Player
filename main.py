@@ -578,12 +578,28 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.second_screen2()
 
     def _playlist_delete(self, pid: str):
+        was_active = False
+        try:
+            ap = self._playlist_manager.active_playlist()
+            was_active = bool(ap and getattr(ap, "id", None) == pid)
+        except Exception:
+            was_active = False
         self._playlist_manager.delete_playlist(pid)
         self._playlist_refresh_sidebar()
-        self._playlist_refresh_tracks()
+        if was_active:
+            self.second_screen()
+            self.screen2_is_downloads = True
+
+            with contextlib.suppress(Exception):
+                if getattr(self, "library_tab", None):
+                    self.library_tab.ids.active_playlist_name.text = "Tracks"
+                    self.library_tab.ids.rv_tracks.data = []
+        else:
+            self._playlist_refresh_tracks()
         with contextlib.suppress(Exception):
             toast("Deleted")
-        self.set_active_playlist_send_to_service()
+        self._update_active_playlist_badge()
+        self._send_active_playlist_to_service()
 
     def set_active_playlist_send_to_service(self):
         self._update_active_playlist_badge()
@@ -593,18 +609,19 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def _playlist_refresh_tracks(self):
         if not getattr(self, "library_tab", None):
             return
-        if not self.screen2_is_downloads:
-            active = self._playlist_manager.active_playlist()
-            self.library_tab.ids.active_playlist_name.text = (
-                active.name if active else "Tracks"
-            )
+
+        ap = None
+        with contextlib.suppress(Exception):
+            ap = self._playlist_manager.active_playlist()
+        if not ap:
+            self.library_tab.ids.active_playlist_name.text = "Tracks"
             self.library_tab.ids.rv_tracks.data = []
-            if not active:
-                return
-            rows = [
-                {"text": t.title, "index": idx} for idx, t in enumerate(active.tracks)
-            ]
-            self.library_tab.ids.rv_tracks.data = rows
+            return
+        self.library_tab.ids.active_playlist_name.text = ap.name or "Playlist"
+        rows = [
+            {"text": t.title, "index": idx} for idx, t in enumerate(ap.tracks or [])
+        ]
+        self.library_tab.ids.rv_tracks.data = rows
 
     def _playlist_import_selective(self):
         """
@@ -688,7 +705,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             grid.add_widget(row)
             self._import_items.append((cb, fn))
             self._all_rows.append((row, cb, fn, lbl))
-
         scroll.add_widget(grid)
         container.add_widget(scroll)
 
@@ -761,6 +777,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self._playlist_refresh_tracks()
         with contextlib.suppress(Exception):
             self._send_active_playlist_to_service()
+        with contextlib.suppress(Exception):
+            self.second_screen2()
 
         with contextlib.suppress(Exception):
             toast(
@@ -917,6 +935,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         songs = self.get_play_list()
         uniq = list(dict.fromkeys(songs))
         self.ids.rv.data = [{"text": str(x[:-4])} for x in uniq]
+        with contextlib.suppress(Exception):
+            self.ids.play_list.text = "Current Playlist: Downloaded"
+        with contextlib.suppress(Exception):
+            self._update_active_playlist_badge()
+            self._send_active_playlist_to_service()
 
     def change_screen_item(self, nav_item):
         if not getattr(self, "screen2_is_downloads", False):
