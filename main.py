@@ -814,6 +814,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             with contextlib.suppress(Exception):
                 self._playlist_refresh_tracks()
                 self._send_active_playlist_to_service()
+            self.second_screen2()
 
     def _playlist_move_down(self, index: int):
         """Move the track at `index` down by one within the active playlist."""
@@ -829,6 +830,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             with contextlib.suppress(Exception):
                 self._playlist_refresh_tracks()
                 self._send_active_playlist_to_service()
+            self.second_screen2()
 
     def _playlist_play_index(self, index: int):
         active = self._playlist_manager.active_playlist()
