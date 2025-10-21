@@ -136,7 +136,10 @@ class PlaylistManager:
 
     def create_and_save_playlist(self, playlists, raw):
         self.data["playlists"] = playlists
-        self.data["active_playlist_id"] = raw.get("active_playlist_id")
+        pid = raw.get("active_playlist_id")
+        self.data["active_playlist_id"] = (
+            pid if any(p.id == pid for p in playlists) else None
+        )
         self.save()
 
     def save(self) -> None:
@@ -190,16 +193,18 @@ class PlaylistManager:
         return list(self.data["playlists"])
 
     def active_playlist(self) -> Optional[Playlist]:
-        return (
-            self._find(self.data["active_playlist_id"])
-            if self.data["active_playlist_id"]
-            else None
-        )
+        pid = self.data.get("active_playlist_id")
+        p = self._find(pid) if pid else None
+        return p if (p and p.tracks) else None
 
     def set_active(self, pid: str) -> None:
         if self._find(pid):
             self.data["active_playlist_id"] = pid
             self.save()
+
+    def clear_active(self) -> None:
+        self.data["active_playlist_id"] = None
+        self.save()
 
     def create_playlist(self, name: str) -> str:
         pid = str(uuid.uuid4())

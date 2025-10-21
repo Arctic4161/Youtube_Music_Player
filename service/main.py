@@ -265,18 +265,12 @@ class Gui_sounds:
     def _check_for_next_loop(self):
         """
         End-of-track monitor (service-side, GUI-independent).
-
-        Behavior:
-          - If SHUFFLE is ON → always advance (service shuffle bag decides).
-          - If SHUFFLE is OFF:
-              * Auto-advance when there IS a next track.
-              * RESET the GUI when the LAST track finishes.
         """
         import os
 
-        TICK = 0.25  # 250 ms cadence
-        REM_EPS = 0.12  # treat <=120 ms remaining as "at end"
-        STUCK_TICKS = int(1.0 / TICK)  # ~1s with no position change
+        TICK = 0.25
+        REM_EPS = 0.89
+        STUCK_TICKS = int(1.0 / TICK)
 
         self._end_fired = False
         last_pos = -1.0
@@ -294,9 +288,8 @@ class Gui_sounds:
                 state = getattr(snd, "state", "") if snd else ""
                 playing = has and (not paused or state == "play")
 
-                # Progress tracking (covers weird/unknown lengths)
                 if playing:
-                    if pos <= last_pos + 0.01:  # <=10ms forward progress
+                    if pos <= last_pos + 0.01:
                         stuck += 1
                     else:
                         stuck = 0
@@ -306,11 +299,9 @@ class Gui_sounds:
                 appears_eof = playing and (stuck >= STUCK_TICKS) and pos > 0.0
                 bg = bool(getattr(Gui_sounds, "main_paused", False))
                 endish = at_true_end or appears_eof or (bg and remaining <= REM_EPS)
-
                 if endish and not self._end_fired:
                     self._end_fired = True
 
-                    # If user held "previous" or explicit loop on the sound, do nothing.
                     if (
                         getattr(Gui_sounds, "previous", False) is True
                         or getattr(snd, "loop", False) is True
@@ -318,41 +309,10 @@ class Gui_sounds:
                         self._next_thread_stop.wait(TICK)
                         self._end_fired = False
                         continue
-
-                    # Normalize playlist + current
-                    items = (
-                        Gui_sounds.playlist
-                        if isinstance(getattr(Gui_sounds, "playlist", None), list)
-                        else []
-                    )
-                    cur = os.path.basename(
-                        getattr(Gui_sounds, "file_to_load", "") or ""
-                    )
-                    try:
-                        idx = items.index(cur)
-                    except ValueError:
-                        idx = None
-
-                    shuffle_on = bool(getattr(Gui_sounds, "shuffle_selected", False))
-
-                    if shuffle_on and len(items) >= 1:
-                        # Shuffle: always advance; service shuffle bag chooses next
-                        Gui_sounds.next()
                     else:
-                        # Non-shuffle:
-                        #  - If there's a next track (idx < last), advance.
-                        #  - If at last (or missing/empty), reset GUI.
-                        has_next = (idx is not None) and (0 <= idx < len(items) - 1)
-                        if has_next:
-                            Gui_sounds.next()
-                        else:
-                            Gui_sounds.send("reset_gui", "reset_gui")
-                            Gui_sounds.checking_it = None
-                            break  # we're done; leave the loop
-
-                # Always yield to keep OSC updates flowing and avoid hot loops
+                        Gui_sounds.next()
+                        break
                 self._next_thread_stop.wait(TICK)
-
             except Exception as e:
                 print("Next-monitor loop error:", e)
                 self._next_thread_stop.wait(TICK)
@@ -633,6 +593,7 @@ class Gui_sounds:
 
     @staticmethod
     def retrieving_song():
+        Gui_sounds._ensure_playlist_from_downloads_if_empty()
         current_song = os.path.basename(Gui_sounds.file_to_load)
         songs = Gui_sounds.playlist
         with contextlib.suppress(TypeError):
@@ -694,7 +655,7 @@ class Gui_sounds:
         if current_idx <= -1 or next_song is None:
             Gui_sounds.previous_songs = []
             try:
-                index_next_song = songs.index(current_song) - 1
+                index_next_song = songs.row_index(current_song) - 1
                 next_song = songs[index_next_song]
             except (ValueError, IndexError):
                 next_song = songs[0] if songs else None
@@ -814,6 +775,22 @@ class Gui_sounds:
         random.shuffle(bag)
         Gui_sounds.shuffle_bag = bag
         Gui_sounds._bag_source_len = len(songs)
+
+    @staticmethod
+    def _downloads_basename_list():
+        base = Gui_sounds.set_local_download
+        try:
+            names = []
+            for ext in (".m4a", ".mp3", ".aac", ".flac", ".ogg", ".wav"):
+                names.extend(fn for fn in os.listdir(base) if fn.lower().endswith(ext))
+            return sorted(set(names))
+        except Exception:
+            return []
+
+    @staticmethod
+    def _ensure_playlist_from_downloads_if_empty():
+        if not isinstance(Gui_sounds.playlist, list) or not Gui_sounds.playlist:
+            Gui_sounds.playlist = Gui_sounds._downloads_basename_list()
 
     @staticmethod
     def send(message_type, message):

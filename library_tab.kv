@@ -49,8 +49,9 @@
 <PlaylistTrackRow>:
     # Data keys: text (str), index (int)
     orientation: "horizontal"
+    default_size: None, dp(44) if Window.width < dp(520) else dp(52)
+    default_size_hint: 1, None
     size_hint_y: None
-    height: dp(56)
     padding: dp(12), 0
     spacing: dp(10)
 
@@ -69,7 +70,6 @@
         size_hint_x: None
         width: dp(48)
         pos_hint: {"center_y": 0.5}
-        on_release: app.root._playlist_remove_track(root.index)
 
 
 <LibraryTab@MDBottomNavigationItem>:
@@ -97,7 +97,7 @@
                     size_hint_y: None
                     height: dp(40)
                     MDLabel:
-                        text: "Playlists"
+                        text: "Playlist"
                         bold: True
                         font_size: app.spx(12)
                     MDFillRoundFlatIconButton:
@@ -140,6 +140,10 @@
                         text: "Tracks"
                         bold: True
                         font_size: app.spx(12)
+                    MDIconButton:
+                        icon: "format-list-numbered"
+                        tooltip_text: "Reorder tracks"
+                        on_release: app.root._playlist_open_reorder_dialog()
                     MDFillRoundFlatIconButton:
                         text: "Import"
                         icon: "file-plus"
