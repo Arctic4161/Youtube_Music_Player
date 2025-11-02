@@ -92,15 +92,29 @@
             size_hint_x: 0.4
             MDBoxLayout:
                 orientation: "vertical"
-                spacing: dp(8)
-                MDBoxLayout:
+                size_hint_y: 1
+                spacing: dp(6)
+
+                MDLabel:
+                    text: "Playlist"
+                    bold: True
+                    font_size: app.spx(12)
                     size_hint_y: None
-                    height: dp(40)
-                    MDLabel:
-                        text: "Playlist"
-                        bold: True
-                        font_size: app.spx(12)
+                    height: self.texture_size[1]
+
+                MDSeparator:
+                    size_hint_y: None
+                    height: dp(1)
+
+                MDBoxLayout:
+                    id: playlist_btn_row
+                    orientation: "horizontal"
+                    size_hint_y: None
+                    height: max(btn_new.height, btn_import.height)
+                    spacing: dp(8)
+
                     MDFillRoundFlatIconButton:
+                        id: btn_new
                         text: "New"
                         icon: "plus"
                         size_hint: None, None
@@ -110,6 +124,11 @@
                         font_size: sp(13) if Window.width < dp(520) else sp(15)
                         padding: [dp(12), 0] if Window.width < dp(520) else [dp(14), 0]
                         on_release: app.root._playlist_prompt_new()
+
+                MDSeparator:
+                    size_hint_y: None
+                    height: dp(1)
+
                 RecycleView:
                     id: rv_playlists
                     viewclass: "PlaylistItem"
@@ -130,21 +149,29 @@
             size_hint_x: 0.65
             MDBoxLayout:
                 orientation: "vertical"
-                spacing: dp(8)
+                size_hint_y: 1
+                spacing: dp(6)
+                MDLabel:
+                    id: active_playlist_name
+                    text: "Tracks"
+                    bold: True
+                    font_size: app.spx(12)
+                    size_hint_y: None
+                    height: self.texture_size[1]
+
+                MDSeparator:
+                    size_hint_y: None
+                    height: dp(1)
 
                 MDBoxLayout:
+                    id: tracks
+                    orientation: "horizontal"
                     size_hint_y: None
-                    height: dp(40)
-                    MDLabel:
-                        id: active_playlist_name
-                        text: "Tracks"
-                        bold: True
-                        font_size: app.spx(12)
-                    MDIconButton:
-                        icon: "format-list-numbered"
-                        tooltip_text: "Reorder tracks"
-                        on_release: app.root._playlist_open_reorder_dialog()
+                    height: max(btn_new.height, btn_import.height)
+                    spacing: dp(8)
+
                     MDFillRoundFlatIconButton:
+                        id: btn_import
                         text: "Import"
                         icon: "file-plus"
                         size_hint: None, None
@@ -154,6 +181,14 @@
                         font_size: sp(13) if Window.width < dp(520) else sp(15)
                         padding: [dp(12), 0] if Window.width < dp(520) else [dp(14), 0]
                         on_release: app.root._playlist_import_selective()
+                    MDIconButton:
+                        icon: "format-list-numbered"
+                        tooltip_text: "Reorder tracks"
+                        on_release: app.root._playlist_open_reorder_dialog()
+
+                MDSeparator:
+                    size_hint_y: None
+                    height: dp(1)
 
                 RecycleView:
                     id: rv_tracks

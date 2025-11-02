@@ -386,14 +386,14 @@ class Gui_sounds:
         page_url = setytlink
 
         common_headers = {
-            "User-Agent": 'Mozilla/5.0 (Windows NT 10.0; rv:135.0) Gecko/20100101 Firefox/135.0',
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; rv:135.0) Gecko/20100101 Firefox/135.0",
             "Referer": page_url,
             "Origin": origin_of(page_url),
             "Accept-Language": "en-US,en;q=0.9",
         }
 
         ydl_opts = {
-            'extractor_args': { 'youtube': {'player_client': ['android_vr']}},
+            "extractor_args": {"youtube": {"player_client": ["android_vr"]}},
             "outtmpl": {"default": audio_path},
             "proxies": {"all": "socks5://154.38.180.176:443"},
             "overwrites": True,

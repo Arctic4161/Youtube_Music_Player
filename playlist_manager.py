@@ -3,8 +3,12 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from os.path import basename, exists, isabs, join, normcase, normpath
 from typing import Dict, List, Optional
 
 from utils import get_app_writable_dir, safe_filename
@@ -301,3 +305,335 @@ class PlaylistManager:
             item = tracks.pop(from_idx)
             tracks.insert(to_idx, item)
             self.save()
+
+    def _looks_like_playlist_json(self, name: str) -> bool:
+        n = (name or "").lower()
+        return n.endswith(".json") and ("playlist" in n)
+
+    def _find_legacy_candidates(self) -> list[str]:
+        candidates = []
+        for d in (
+            get_app_writable_dir("Downloaded/Backups"),
+            get_app_writable_dir("Downloaded"),
+        ):
+            with contextlib.suppress(Exception):
+                candidates.extend(
+                    os.path.normpath(os.path.join(d, fn))
+                    for fn in os.listdir(d)
+                    if self._looks_like_playlist_json(fn)
+                )
+        uniq = []
+        seen = set()
+        for p in candidates:
+            if p not in seen:
+                seen.add(p)
+                uniq.append(p)
+
+        with contextlib.suppress(Exception):
+            uniq.sort(key=os.path.getmtime)
+        return uniq
+
+    def write_canonical_json(self, filename: str = "playlist.json") -> str:
+        """Write current playlists to Downloads/Backups/<filename> atomically."""
+        export_dir = get_app_writable_dir("Downloaded/Backups")
+        os.makedirs(export_dir, exist_ok=True)
+        path = os.path.join(export_dir, filename)
+        data = self.export_dict() if hasattr(self, "export_dict") else self.to_dict()
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        return path
+
+    def consolidate_legacy_jsons(self, remove_originals: bool = True) -> Optional[str]:
+        """
+        Import+merge every legacy playlist*.json in Downloads/Backups and Downloads,
+        then write a single canonical Downloads/Backups/playlist.json.
+        Returns the canonical path or None if nothing was consolidated.
+        """
+        files = self._find_legacy_candidates()
+        if not files:
+            return None
+
+        try:
+            existing_count = len(self.data.get("playlists", []))
+        except Exception:
+            existing_count = 0
+
+        first = True
+        for path in files:
+            base = os.path.basename(path).lower()
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+            except Exception as e:
+                print("Skip invalid playlist JSON:", path, e)
+                continue
+
+            if first and existing_count == 0:
+                if hasattr(self, "import_from_dict"):
+                    self.import_from_dict(raw, merge=False)
+                else:
+                    self.load_from_dict(raw)
+                first = False
+                existing_count = 1
+            elif hasattr(self, "import_from_dict"):
+                self.import_from_dict(raw, merge=True)
+            else:
+                self.load_from_dict(raw)
+
+        canonical = self.write_canonical_json("playlist.json")
+
+        if remove_originals:
+            archive_root = os.path.join(
+                get_app_writable_dir("Downloaded/Backups"), "Imported_Archive"
+            )
+            os.makedirs(archive_root, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            archive_dir = os.path.join(archive_root, f"run_{ts}")
+            os.makedirs(archive_dir, exist_ok=True)
+            for p in files:
+                if os.path.normpath(p) == os.path.normpath(canonical):
+                    continue
+                with contextlib.suppress(Exception):
+                    shutil.move(p, os.path.join(archive_dir, os.path.basename(p)))
+        return canonical
+
+    def auto_consolidate_if_needed(self) -> Optional[str]:
+        """
+        Run consolidation once if either there are no playlists OR no sentinel exists.
+        Keeps a sentinel in Backups to avoid repeating work on every launch.
+        """
+        sentinel_dir = get_app_writable_dir("Downloaded/Backups")
+        os.makedirs(sentinel_dir, exist_ok=True)
+        sentinel = os.path.join(sentinel_dir, ".auto_consolidate_done")
+
+        try:
+            playlists_count = len(self.data.get("playlists", []))
+        except Exception:
+            playlists_count = 0
+
+        should = (playlists_count == 0) or (not os.path.exists(sentinel))
+        if not should:
+            return None
+
+        out = self.consolidate_legacy_jsons(remove_originals=True)
+        with open(sentinel, "w", encoding="utf-8") as f:
+            f.write("done")
+        return out
+
+
+def _pm_export_dict(self) -> dict:
+    data = self.to_dict()
+    with contextlib.suppress(Exception):
+        data.setdefault("meta", {})
+        data["meta"]["schema"] = "youtube-music-player.playlists.v1"
+        data["meta"]["exported_at"] = datetime.now(timezone.utc).isoformat()
+    return data
+
+
+PlaylistManager.export_dict = _pm_export_dict
+
+
+def _pm_import_from_dict(self, raw: dict, merge: bool = False) -> None:
+    try:
+        root = get_app_writable_dir("Downloaded/Played")
+    except Exception:
+        root = os.getcwd()
+
+    def _abs_norm(pth: str) -> str:
+        np = normpath(pth or "")
+        if np and not os.path.isabs(np):
+            np = join(root, np)
+        return normcase(normpath(np))
+
+    if not merge:
+        return self.load_from_dict(raw)
+
+    incoming: List[Playlist] = []
+    for p in raw.get("playlists", []):
+        tr = []
+        for t in p.get("tracks", []):
+            raw_path = t.get("path") or ""
+            if raw_path and not isabs(raw_path):
+                raw_path = normpath(join(root, raw_path))
+            name = t.get("title") or os.path.splitext(basename(raw_path))[0]
+            dur = t.get("duration", 0.0)
+            thumb = t.get("thumb")
+            if thumb and not isabs(thumb):
+                thumb_abs = normpath(join(root, thumb))
+                thumb = thumb_abs if exists(thumb_abs) else thumb
+            tr.append(Track(title=name, path=raw_path, duration=dur, thumb=thumb))
+        incoming.append(
+            Playlist(
+                id=p.get("id", str(uuid.uuid4())),
+                name=p.get("name", "Untitled"),
+                tracks=tr,
+            )
+        )
+
+    existing_by_name = {
+        (p.name or "").strip().lower(): p for p in self.data["playlists"]
+    }
+    for inc in incoming:
+        key = (inc.name or "Untitled").strip().lower()
+        if key not in existing_by_name:
+            self.data["playlists"].append(
+                Playlist(id=str(uuid.uuid4()), name=inc.name, tracks=list(inc.tracks))
+            )
+            existing_by_name[key] = self.data["playlists"][-1]
+        else:
+            dst = existing_by_name[key]
+            seen = {
+                _abs_norm(getattr(t, "path", ""))
+                for t in dst.tracks
+                if getattr(t, "path", "")
+            }
+            seen_basenames = {
+                os.path.basename(getattr(t, "path", ""))
+                for t in dst.tracks
+                if getattr(t, "path", "")
+            }
+            for t in inc.tracks:
+                keyp = _abs_norm(getattr(t, "path", ""))
+                base = os.path.basename(getattr(t, "path", ""))
+                if keyp and keyp not in seen and base not in seen_basenames:
+                    dst.tracks.append(t)
+                    seen.add(keyp)
+                    seen_basenames.add(base)
+
+    if not self.data.get("active_playlist_id"):
+        pid = raw.get("active_playlist_id")
+        if pid and any(p.id == pid for p in self.data["playlists"]):
+            self.data["active_playlist_id"] = pid
+    self.save()
+
+
+PlaylistManager.import_from_dict = _pm_import_from_dict
+
+
+def _pm_write_canonical_json(self, filename: str = "playlist.json") -> str:
+    pm = self
+    export_dir = get_app_writable_dir("Downloaded/Backups")
+    os.makedirs(export_dir, exist_ok=True)
+    path = os.path.join(export_dir, filename)
+    data = pm.export_dict() if hasattr(pm, "export_dict") else pm.to_dict()
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    return path
+
+
+PlaylistManager.write_canonical_json = _pm_write_canonical_json
+
+
+def _pm_consolidate_legacy_jsons(
+    self, remove_originals: bool = True, canonical_name: str = "playlist.json"
+) -> str | None:
+    pm = self
+
+    def looks_like_playlist_json(name: str) -> bool:
+        n = (name or "").lower()
+        return n.endswith(".json") and ("playlist" in n)
+
+    search_dirs = [
+        get_app_writable_dir("Downloaded/Backups"),
+        get_app_writable_dir("Downloaded"),
+    ]
+    candidates = []
+    for d in search_dirs:
+        with contextlib.suppress(Exception):
+            for fn in os.listdir(d):
+                if looks_like_playlist_json(fn):
+                    candidates.append(os.path.join(d, fn))
+
+    uniq = []
+    seen = set()
+    for pth in candidates:
+        np = os.path.normpath(pth)
+        if np not in seen:
+            seen.add(np)
+            uniq.append(np)
+    try:
+        uniq.sort(key=os.path.getmtime)
+    except Exception:
+        uniq.sort()
+
+    if not uniq:
+        return None
+
+    try:
+        existing_count = len(pm.data.get("playlists", []))
+    except Exception:
+        existing_count = 0
+    first = True
+    for path in uniq:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as e:
+            print("Skip invalid JSON:", path, e)
+            continue
+
+        if first and existing_count == 0:
+            if hasattr(pm, "import_from_dict"):
+                pm.import_from_dict(raw, merge=False)
+            else:
+                pm.load_from_dict(raw)
+            first = False
+            existing_count = 1
+        else:
+            if hasattr(pm, "import_from_dict"):
+                pm.import_from_dict(raw, merge=True)
+            else:
+                pm.load_from_dict(raw)
+
+    canonical = pm.write_canonical_json(canonical_name)
+
+    if remove_originals:
+        archive_root = os.path.join(
+            get_app_writable_dir("Downloaded/Backups"), "Imported_Archive"
+        )
+        os.makedirs(archive_root, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        archive_dir = os.path.join(archive_root, f"run_{ts}")
+        os.makedirs(archive_dir, exist_ok=True)
+        for pth in uniq:
+            if os.path.normpath(pth) == os.path.normpath(canonical):
+                continue
+            with contextlib.suppress(Exception):
+                shutil.move(pth, os.path.join(archive_dir, os.path.basename(pth)))
+
+    return canonical
+
+
+PlaylistManager.consolidate_legacy_jsons = _pm_consolidate_legacy_jsons
+
+
+def _pm_try_auto_import_legacy(self) -> str | None:
+    pm = self
+    sentinel_dir = get_app_writable_dir("Downloaded/Backups")
+    os.makedirs(sentinel_dir, exist_ok=True)
+    sentinel = os.path.join(sentinel_dir, ".auto_import_done")
+
+    try:
+        playlists_count = len(pm.data.get("playlists", []))
+    except Exception:
+        playlists_count = 0
+
+    should = (playlists_count == 0) or (not os.path.exists(sentinel))
+    if not should:
+        return None
+
+    out = pm.consolidate_legacy_jsons(remove_originals=True)
+    with open(sentinel, "w", encoding="utf-8") as f:
+        f.write("done")
+    return out
+
+
+PlaylistManager.try_auto_import_legacy = _pm_try_auto_import_legacy

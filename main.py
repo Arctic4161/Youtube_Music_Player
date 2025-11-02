@@ -1368,7 +1368,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.get_update_slider = Clock.schedule_interval(
             self.wait_update_slider, 1
         )
-        if not getattr(self, "_screen2_is_downloads", False):
+        if not getattr(self, "screen2_is_downloads", False):
             self._send_active_playlist_to_service()
         self.second_screen2()
         MDApp.get_running_app().root.ids.play_btt.disabled = True
@@ -1740,7 +1740,6 @@ class Musicapp(MDApp):
     def _resume_handshake(self, *args):
         """Run on the main thread: safely re-sync UI with playback state."""
         root = self.root
-
         GUILayout.send("iamawake", "hello")
 
         with contextlib.suppress(Exception):
@@ -1752,15 +1751,10 @@ class Musicapp(MDApp):
             if hasattr(root.ids, "previous_btt"):
                 root.ids.previous_btt.disabled = True
         with contextlib.suppress(Exception):
-            if getattr(root, "refresh_playlist", None):
-                Clock.schedule_once(lambda dt: root.refresh_playlist(), 0)
-            if getattr(root, "_send_active_playlist_to_service", None):
-                Clock.schedule_once(
-                    lambda dt: root._send_active_playlist_to_service(), 0
-                )
-        with contextlib.suppress(Exception):
             if getattr(root, "get_update_slider", None):
                 root.get_update_slider.cancel()
+                Clock.unschedule(getattr(root, "get_update_slider", None))
+                Clock.unschedule(getattr(GUILayout, "get_update_slider", None))
         with contextlib.suppress(Exception):
             root.get_update_slider = Clock.schedule_interval(root.wait_update_slider, 1)
 
