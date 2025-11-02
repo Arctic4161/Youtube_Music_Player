@@ -147,20 +147,17 @@ class MySlider(MDSlider):
                 self.set_gui_to_play_from_touchup()
             with contextlib.suppress(Exception):
                 GUILayout.get_update_slider.cancel()
-
             GUILayout.get_update_slider = Clock.schedule_interval(
                 GUILayout.wait_update_slider, 1
             )
-
-            GUILayout.send("play", "play")
-            Clock.schedule_once(
-                lambda dt: GUILayout.send("seek_seconds", str(int(secs))), 0
-            )
+            is_paused = False
+            with contextlib.suppress(Exception):
+                is_paused = bool(MDApp.get_running_app().root.paused)
+            Clock.schedule_once(lambda dt: GUILayout.send("seek_seconds", str(int(secs))), 0)
+            if is_paused:
+                Clock.schedule_once(lambda dt: GUILayout.send("play", "play"), 0.05)
             Clock.schedule_once(lambda dt: GUILayout.send("iamawake", "ping"), 0.05)
-            Clock.schedule_once(
-                lambda dt: setattr(GUILayout, "is_scrubbing", False), 0.1
-            )
-
+            Clock.schedule_once(lambda dt: setattr(GUILayout, "is_scrubbing", False), 0.1)
         return super(MySlider, self).on_touch_up(touch)
 
     def set_gui_to_play_from_touchup(self):
