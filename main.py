@@ -134,31 +134,45 @@ class MySlider(MDSlider):
 
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
-            GUILayout.is_scrubbing = True
-        return super(MySlider, self).on_touch_down(touch)
+            setattr(GUILayout, "is_scrubbing", True)
+            touch.grab(self)
+            super().on_touch_down(touch)
+            return True
+        return super().on_touch_down(touch)
 
     def on_touch_up(self, touch):
-        if self.collide_point(*touch.pos):
+        if touch.grab_current is self:
+            touch.ungrab(self)
             try:
                 secs = float(self.value)
             except Exception:
                 secs = 0.0
+
             with contextlib.suppress(Exception):
                 self.set_gui_to_play_from_touchup()
-            with contextlib.suppress(Exception):
-                GUILayout.get_update_slider.cancel()
-            GUILayout.get_update_slider = Clock.schedule_interval(
-                GUILayout.wait_update_slider, 1
+
+            app = MDApp.get_running_app()
+            root = getattr(app, "root", None)
+            is_paused = bool(getattr(root, "paused", False))
+            Clock.schedule_once(
+                lambda dt: GUILayout.send("seek_seconds", str(int(secs))), 0
             )
-            is_paused = False
-            with contextlib.suppress(Exception):
-                is_paused = bool(MDApp.get_running_app().root.paused)
-            Clock.schedule_once(lambda dt: GUILayout.send("seek_seconds", str(int(secs))), 0)
             if is_paused:
                 Clock.schedule_once(lambda dt: GUILayout.send("play", "play"), 0.05)
             Clock.schedule_once(lambda dt: GUILayout.send("iamawake", "ping"), 0.05)
-            Clock.schedule_once(lambda dt: setattr(GUILayout, "is_scrubbing", False), 0.1)
-        return super(MySlider, self).on_touch_up(touch)
+            super().on_touch_up(touch)
+            Clock.schedule_once(lambda dt: setattr(GUILayout, "is_scrubbing", False), 0)
+
+            return True
+        return super().on_touch_up(touch)
+
+    def on_touch_cancel(self, touch):
+        if touch.grab_current is self:
+            touch.ungrab(self)
+            Clock.schedule_once(lambda dt: setattr(GUILayout, "is_scrubbing", False), 0)
+            super().on_touch_cancel(touch)
+            return True
+        return super().on_touch_cancel(touch)
 
     def set_gui_to_play_from_touchup(self):
         app = MDApp.get_running_app()
