@@ -133,53 +133,35 @@ class MySlider(MDSlider):
     sound = ObjectProperty()
 
     def on_touch_down(self, touch):
-        if "button" in touch.profile and touch.button != "left":
-            return super().on_touch_down(touch)
-
-        if getattr(touch, "is_mouse_scrolling", True) or touch.ud.get("was_scroll"):
-            with contextlib.suppress(Exception):
-                touch.ud["was_scroll"] = True
-            return super().on_touch_down(touch)
-
-        if not self.collide_point(*touch.pos):
-            return super().on_touch_down(touch)
-        d = self.ids.get("delete_btn", None)
-        if d and d.collide_point(*touch.pos):
-            self._touch_started_on_delete = True
-            return True
-
-        self._touch_started_on_delete = False
-        touch.ud.pop("was_scroll", None)
-        touch.ud["down_pos"] = touch.pos
-        return super().on_touch_down(touch)
-
-    def on_touch_move(self, touch):
-        if self.collide_point(*touch.pos) and "down_pos" in touch.ud:
-            x0, y0 = touch.ud["down_pos"]
-            dx = touch.x - x0
-            dy = touch.y - y0
-            if (dx * dx + dy * dy) > (dp(6) ** 2):
-                touch.ud["was_scroll"] = True
-        return super().on_touch_move(touch)
+        if self.collide_point(*touch.pos):
+            GUILayout.is_scrubbing = True
+        return super(MySlider, self).on_touch_down(touch)
 
     def on_touch_up(self, touch):
-        if touch.ud.get("was_scroll"):
-            return super().on_touch_up(touch)
-        if getattr(self, "_touch_started_on_delete", False):
-            self._touch_started_on_delete = False
-            d = self.ids.get("delete_btn", None)
-            if d and d.collide_point(*touch.pos):
-                with contextlib.suppress(Exception):
-                    MDApp.get_running_app().root._playlist_remove_track(int(self.index))
-                return True
-            return True
-
         if self.collide_point(*touch.pos):
+            try:
+                secs = float(self.value)
+            except Exception:
+                secs = 0.0
             with contextlib.suppress(Exception):
-                MDApp.get_running_app().root._playlist_play_index(int(self.index))
-            return True
+                self.set_gui_to_play_from_touchup()
+            with contextlib.suppress(Exception):
+                GUILayout.get_update_slider.cancel()
 
-        return super().on_touch_up(touch)
+            GUILayout.get_update_slider = Clock.schedule_interval(
+                GUILayout.wait_update_slider, 1
+            )
+
+            GUILayout.send("play", "play")
+            Clock.schedule_once(
+                lambda dt: GUILayout.send("seek_seconds", str(int(secs))), 0
+            )
+            Clock.schedule_once(lambda dt: GUILayout.send("iamawake", "ping"), 0.05)
+            Clock.schedule_once(
+                lambda dt: setattr(GUILayout, "is_scrubbing", False), 0.1
+            )
+
+        return super(MySlider, self).on_touch_up(touch)
 
     def set_gui_to_play_from_touchup(self):
         app = MDApp.get_running_app()
