@@ -49,7 +49,13 @@ _hidden = [] + collect_submodules('kivymd')
 # (If they're imported normally by main.py, this isn't strictly necessary,
 #  but listing here is harmless and sometimes helps on edge cases.)
 _extra_sources = [
+    ('download_config.py', '.'),
+    ('media_identity.py', '.'),
+    ('playback_logic.py', '.'),
     ('playlist_manager.py', '.'),
+    ('search_logic.py', '.'),
+    ('service_lifecycle.py', '.'),
+    ('timer_lifecycle.py', '.'),
     ('utils.py', '.'),
     ('./service/main.py', './service'),
 ]
@@ -76,7 +82,7 @@ a = Analysis(
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=None)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
@@ -96,7 +102,6 @@ exe = EXE(
 coll = COLLECT(
     exe,
     a.binaries,
-    a.zipfiles,
     a.datas,
     *([Tree(p) for p in _kivy_bins] if _kivy_bins else []),
     strip=False,

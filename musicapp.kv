@@ -201,7 +201,7 @@
             AsyncImage:
                 size_hint: None, None
                 size: "48dp", "48dp"
-                source: app.get_thumb_path(root.text or "")
+                source: app.get_thumb_path(root.filename or root.text or "")
 
             MDBoxLayout:
                 orientation: "vertical"
@@ -251,10 +251,10 @@
                 icon: "play"
                 tooltip_text: "Play"
                 on_release:
-                    app.root.getting_song(message=root.text + ".m4a")
+                    app.root.getting_song(message=root.filename or root.text + ".m4a")
                     app.root.change_screen_item("Screen 1")
 
             MDIconButton:
                 icon: "dots-vertical"
                 tooltip_text: "Options"
-                on_release: app.root.message_box(message=root.text + ".m4a")
+                on_release: app.root.message_box(message=root.filename or root.text + ".m4a")

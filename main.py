@@ -3,10 +3,22 @@ import json
 import os
 import sys
 import time
+import uuid
 from runpy import run_path
 
 import utils
-from utils import get_app_writable_dir
+from media_identity import audio_filename, display_title_from_stem, stable_media_id
+from playback_logic import (
+    DownloadRequestTracker,
+    PlaybackSnapshot,
+    PlaybackStatus,
+    normalize_playback_status,
+)
+from service_lifecycle import start_android_service, stop_android_service
+from search_logic import SearchResult, parse_search_results
+from timer_lifecycle import cancel_event, replace_event
+from ui_scaling import bounded_ui_scale
+from utils import cleanup_download_artifacts, get_app_writable_dir
 
 kivy_home = get_app_writable_dir("Downloaded")
 os.makedirs(kivy_home, exist_ok=True)
@@ -16,16 +28,35 @@ os.environ["KIVY_NO_CONSOLELOG"] = "1"
 if utils.get_platform() != "android":
     os.environ["KIVY_AUDIO"] = "gstplayer"
 else:
-    import android
     from android.permissions import Permission, request_permissions
+    from android.runnable import run_on_ui_thread
+    from jnius import PythonJavaClass, autoclass, java_method
 
     request_permissions(
         [
-            Permission.READ_MEDIA_AUDIO,
-            Permission.READ_EXTERNAL_STORAGE,
             Permission.POST_NOTIFICATIONS,
         ]
     )
+
+
+def _android_music_service_handles():
+    """Return the generated foreground-service class and Activity context."""
+
+    service_class = autoclass(
+        "com.youtubemusicplayer.youtubemusicplayer.ServiceMusicservice"
+    )
+    activity = autoclass("org.kivy.android.PythonActivity").mActivity
+    return service_class, activity
+
+
+def _android_download_service_handles():
+    """Return the generated data-sync service class and Activity context."""
+
+    service_class = autoclass(
+        "com.youtubemusicplayer.youtubemusicplayer.ServiceDownloadservice"
+    )
+    activity = autoclass("org.kivy.android.PythonActivity").mActivity
+    return service_class, activity
 from kivy.config import Config
 
 if utils.get_platform() == "android":
@@ -66,9 +97,67 @@ from kivymd.uix.slider import MDSlider
 from kivymd.uix.textfield import MDTextField
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
+
+
+_android_insets_listener = None
+
+
+if utils.get_platform() == "android":
+
+    class _AndroidWindowInsetsListener(PythonJavaClass):
+        """Keep Kivy content clear of enforced Android system-bar insets."""
+
+        __javainterfaces__ = ["android/view/View$OnApplyWindowInsetsListener"]
+        __javacontext__ = "app"
+
+        def __init__(self, inset_type):
+            super().__init__()
+            self._inset_type = inset_type
+
+        @java_method(
+            "(Landroid/view/View;Landroid/view/WindowInsets;)"
+            "Landroid/view/WindowInsets;"
+        )
+        def onApplyWindowInsets(self, view, window_insets):
+            safe = window_insets.getInsets(self._inset_type)
+            view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
+            return window_insets
+
+
+    @run_on_ui_thread
+    def _apply_android_system_bar_insets():
+        """Install inset padding only where Android enforces edge-to-edge."""
+
+        global _android_insets_listener
+        BuildVersion = autoclass("android.os.Build$VERSION")
+        if int(BuildVersion.SDK_INT) < 35:
+            return
+        activity = autoclass("org.kivy.android.PythonActivity").mActivity
+        AndroidId = autoclass("android.R$id")
+        content_view = activity.findViewById(AndroidId.content)
+        if content_view is None:
+            return
+        InsetType = autoclass("android.view.WindowInsets$Type")
+        inset_type = InsetType.systemBars() | InsetType.displayCutout()
+        _android_insets_listener = _AndroidWindowInsetsListener(inset_type)
+        content_view.setOnApplyWindowInsetsListener(_android_insets_listener)
+        content_view.requestApplyInsets()
+
+else:
+
+    def _apply_android_system_bar_insets():
+        """No-op on desktop platforms."""
+
+        return None
+
+
 from youtubesearchpython import VideosSearch
 
 from playlist_manager import PlaylistManager
+
+DOWNLOAD_INACTIVITY_TIMEOUT_SECONDS = 120.0
+SERVICE_RECONNECT_RETRY_SECONDS = 0.5
+SERVICE_RECONNECT_TIMEOUT_SECONDS = 10.0
 
 
 def default_cover_path():
@@ -86,10 +175,13 @@ def default_cover_path():
 
 class RecycleViewRow(BoxLayout):
     text = StringProperty()
+    filename = StringProperty()
 
 
 class PlaylistTrackRow(MDBoxLayout):
     text = StringProperty("")
+    index = NumericProperty(-1)
+    playlist_id = StringProperty("")
 
     def on_touch_down(self, touch):
         if "button" in touch.profile and touch.button != "left":
@@ -111,7 +203,7 @@ class PlaylistTrackRow(MDBoxLayout):
         if getattr(touch, "is_mouse_scrolling", False) or touch.ud.get("was_scroll"):
             with contextlib.suppress(Exception):
                 touch.ud["was_scroll"] = True
-            return super().on_touch_down(touch)
+            return super().on_touch_up(touch)
         if getattr(self, "_touch_started_on_delete", False):
             self._touch_started_on_delete = False
             d = self.ids.get("delete_btn", None)
@@ -123,7 +215,10 @@ class PlaylistTrackRow(MDBoxLayout):
 
         if self.collide_point(*touch.pos):
             with contextlib.suppress(Exception):
-                MDApp.get_running_app().root._playlist_play_index(int(self.index))
+                MDApp.get_running_app().root._playlist_play_index(
+                    int(self.index),
+                    self.playlist_id,
+                )
             return True
 
         return super().on_touch_up(touch)
@@ -151,14 +246,9 @@ class MySlider(MDSlider):
             with contextlib.suppress(Exception):
                 self.set_gui_to_play_from_touchup()
 
-            app = MDApp.get_running_app()
-            root = getattr(app, "root", None)
-            is_paused = bool(getattr(root, "paused", False))
             Clock.schedule_once(
                 lambda dt: GUILayout.send("seek_seconds", str(int(secs))), 0
             )
-            if is_paused:
-                Clock.schedule_once(lambda dt: GUILayout.send("play", "play"), 0.05)
             Clock.schedule_once(lambda dt: GUILayout.send("iamawake", "ping"), 0.05)
             super().on_touch_up(touch)
             Clock.schedule_once(lambda dt: setattr(GUILayout, "is_scrubbing", False), 0)
@@ -192,6 +282,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     store = ObjectProperty(None)
     gui_reset = False
     is_scrubbing = False
+    service = None
+    service_started = False
+    download_client = None
+    get_update_slider = None
+    service_playback_status = PlaybackStatus.IDLE.value
     screen2_is_downloads = BooleanProperty(True)
     image_path = default_cover_path()
     set_local_download = get_app_writable_dir("Downloaded/Played")
@@ -201,15 +296,227 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if utils.get_platform() != "android":
             return
         try:
-            GUILayout.service = android.start_service(
-                "Music Player",
-                "Playing in background",
-                "musicservice",
+            # python-for-android service starts are idempotent. Calling this on each
+            # foreground reconnect recovers a service Android killed independently.
+            service_class, activity = _android_music_service_handles()
+            GUILayout.service_started = start_android_service(
+                service_class,
+                context=activity,
+                argument="musicservice",
             )
-            print("[service] started via android.start_service")
+            print("[service] started via generated ServiceMusicservice")
             return
         except Exception as e:
-            print("[service] android.start_service unavailable:", e)
+            print("[service] generated service start unavailable:", e)
+
+    def _ensure_music_service(self):
+        """Start the service after the GUI's OSC listener is ready."""
+
+        if utils.get_platform() == "android":
+            self._start_music_service_user_initiated()
+            return
+        service = GUILayout.service
+        if service is not None and service.is_alive():
+            return
+        GUILayout.service = Thread(
+            target=run_path,
+            args=[os.path.join(os.path.dirname(__file__), "./service/main.py")],
+            kwargs={"run_name": "__main__"},
+            daemon=True,
+        )
+        GUILayout.service.start()
+
+    def _cancel_service_reconnect(self):
+        cancel_event(getattr(self, "_service_reconnect_retry", None))
+        cancel_event(getattr(self, "_service_reconnect_timeout", None))
+        self._service_reconnect_retry = None
+        self._service_reconnect_timeout = None
+        self._service_reconnect_request_id = None
+
+    def _send_service_reconnect(self, _dt=0):
+        request_id = getattr(self, "_service_reconnect_request_id", None)
+        if request_id is None:
+            return False
+        with contextlib.suppress(Exception):
+            GUILayout.send("iamawake", json.dumps({"request_id": request_id}))
+        return True
+
+    def _service_reconnect_timed_out(self, _dt):
+        if getattr(self, "_service_reconnect_request_id", None) is None:
+            return
+        self._cancel_service_reconnect()
+        GUILayout.service_playback_status = PlaybackStatus.IDLE.value
+        self._reset_to_startup_gui()
+
+        def _show_timeout(_timeout_dt):
+            with contextlib.suppress(Exception):
+                self.ids.info.text = "Playback service did not respond."
+
+        Clock.schedule_once(_show_timeout, 0)
+
+    @mainthread
+    def begin_service_reconnect(self, *_args):
+        """Start or rediscover the service and request its complete state."""
+
+        self._cancel_service_reconnect()
+        self._ensure_music_service()
+        self._service_reconnect_request_id = uuid.uuid4().hex
+        GUILayout.service_playback_status = "pending"
+        cancel_event(GUILayout.get_update_slider)
+        GUILayout.get_update_slider = None
+        with contextlib.suppress(Exception):
+            if GUILayout.slider is not None:
+                GUILayout.slider.disabled = True
+            self.ids.next_btt.disabled = True
+            self.ids.previous_btt.disabled = True
+        self._send_service_reconnect()
+        self._service_reconnect_retry = Clock.schedule_interval(
+            self._send_service_reconnect,
+            SERVICE_RECONNECT_RETRY_SECONDS,
+        )
+        self._service_reconnect_timeout = Clock.schedule_once(
+            self._service_reconnect_timed_out,
+            SERVICE_RECONNECT_TIMEOUT_SECONDS,
+        )
+
+    @staticmethod
+    def _format_playback_time(seconds: float) -> str:
+        text = time.strftime("%H:%M:%S", time.gmtime(max(0.0, seconds)))
+        return text[3:] if text.startswith("00:") else text
+
+    def _show_snapshot_track(self, snapshot: PlaybackSnapshot):
+        if not snapshot.track_name:
+            return
+        filename = os.path.basename(snapshot.track_name)
+        title, _extension = os.path.splitext(filename)
+        self.stream = os.path.join(self.set_local_download, filename)
+        derived_cover = os.path.join(self.set_local_download, f"{title}.jpg")
+        cover_path = snapshot.cover_path or derived_cover
+        if not os.path.exists(cover_path):
+            cover_path = default_cover_path()
+        self.set_local = cover_path
+        self.settitle = display_title_from_stem(title)
+        with contextlib.suppress(Exception):
+            self.ids.imageView.source = str(cover_path)
+            if utils.get_platform() == "android":
+                self.ids.imageView.size_hint_x = 0.7
+                self.ids.imageView.size_hint_y = 0.7
+            self.ids.song_title.text = (
+                f"{self.settitle[:51]}..."
+                if len(self.settitle) > 51
+                else self.settitle
+            )
+
+    def _show_snapshot_timeline(self, snapshot: PlaybackSnapshot):
+        if GUILayout.slider is None:
+            self.make_slider()
+        duration = max(0.0, snapshot.duration)
+        position = max(0.0, snapshot.position)
+        if duration > 0.0:
+            position = min(position, duration)
+        self.length = duration
+        self.song_pos = position
+        GUILayout.slider.max = max(duration, 1.0)
+        GUILayout.slider.value = position
+        self.ids.song_position.text = self._format_playback_time(position)
+        self.ids.song_max.text = self._format_playback_time(
+            max(0.0, duration - position)
+        )
+        self.ids.song_position.opacity = 1
+        self.ids.song_max.opacity = 1
+        self.fileosc_loaded = True
+
+    def _apply_playback_snapshot(self, snapshot: PlaybackSnapshot):
+        status = snapshot.status
+        GUILayout.service_playback_status = status.value
+        self.repeat_selected = snapshot.repeat_enabled
+        self.shuffle_selected = snapshot.shuffle_enabled
+        # Any loaded service queue owns Next/Previous. A one-song queue has no
+        # destination, but it must never fall back to browsing search results.
+        self.playlist_mode = snapshot.queue_size >= 1
+
+        with contextlib.suppress(Exception):
+            self.ids.repeat_btt.text_color = (
+                1 if snapshot.repeat_enabled else 0,
+                0,
+                0,
+                1,
+            )
+            self.ids.shuffle_btt.text_color = (
+                1 if snapshot.shuffle_enabled else 0,
+                0,
+                0,
+                1,
+            )
+
+        if status is PlaybackStatus.IDLE:
+            self.repeat_selected = False
+            self.shuffle_selected = False
+            self.playlist_mode = False
+            with contextlib.suppress(Exception):
+                self.ids.repeat_btt.text_color = 0, 0, 0, 1
+                self.ids.shuffle_btt.text_color = 0, 0, 0, 1
+            self._reset_to_startup_gui()
+            return
+
+        self._show_snapshot_track(snapshot)
+        if snapshot.track_name:
+            self._show_snapshot_timeline(snapshot)
+
+        has_queue_navigation = snapshot.queue_size >= 2
+        is_loading = status is PlaybackStatus.LOADING
+        self.paused = status is PlaybackStatus.PAUSED
+        GUILayout.playing_song = status is PlaybackStatus.PLAYING
+
+        with contextlib.suppress(Exception):
+            self.ids.play_btt.disabled = status is not PlaybackStatus.PAUSED
+            self.ids.play_btt.opacity = 1 if status is PlaybackStatus.PAUSED else 0
+            self.ids.pause_btt.disabled = status is not PlaybackStatus.PLAYING
+            self.ids.pause_btt.opacity = 1 if status is PlaybackStatus.PLAYING else 0
+            self.ids.next_btt.disabled = is_loading or not has_queue_navigation
+            self.ids.previous_btt.disabled = is_loading or not has_queue_navigation
+            self.ids.next_btt.opacity = 1 if has_queue_navigation else 0
+            self.ids.previous_btt.opacity = 1 if has_queue_navigation else 0
+            self.ids.repeat_btt.disabled = is_loading
+            self.ids.repeat_btt.opacity = 1
+            self.ids.shuffle_btt.disabled = is_loading or not has_queue_navigation
+            self.ids.shuffle_btt.opacity = 1 if has_queue_navigation else 0
+            if is_loading and not self.ids.info.text:
+                self.ids.info.text = "Preparing audio..."
+            elif not is_loading:
+                self.ids.info.text = ""
+            if GUILayout.slider is not None:
+                GUILayout.slider.disabled = is_loading
+                GUILayout.slider.opacity = 1 if snapshot.track_name else 0
+
+        cancel_event(GUILayout.get_update_slider)
+        GUILayout.get_update_slider = None
+        if status is PlaybackStatus.PLAYING:
+            GUILayout.get_update_slider = replace_event(
+                GUILayout.get_update_slider,
+                lambda: Clock.schedule_interval(self.wait_update_slider, 1),
+            )
+
+    @mainthread
+    def apply_playback_snapshot(self, *values):
+        parts = []
+        for value in values:
+            if isinstance(value, (bytes, bytearray)):
+                parts.append(bytes(value).decode("utf-8", "ignore"))
+            else:
+                parts.append(str(value))
+        snapshot = PlaybackSnapshot.from_json("".join(parts))
+        if snapshot is None:
+            return
+        active_request = getattr(self, "_service_reconnect_request_id", None)
+        if active_request is not None and snapshot.request_id != active_request:
+            return
+        if active_request is None and snapshot.request_id:
+            return
+        self._cancel_service_reconnect()
+        if utils.get_platform() == "android":
+            GUILayout.service_started = True
+        self._apply_playback_snapshot(snapshot)
 
     def reset_for_new_query(self):
         """Clear time + status and hide the slider before a new search/load kicks off."""
@@ -249,21 +556,22 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def check_are_we_playing(self, *val):
         raw = "".join(val)
-        if raw in {"True", "False", "None"}:
-            GUILayout.check_are_paused = raw
-        else:
-            GUILayout.check_are_paused = (
-                "True"
-                if raw.lower() == "true"
-                else "False" if raw.lower() == "false" else "None"
-            )
+        status = normalize_playback_status(raw)
+        if status is not None:
+            GUILayout.service_playback_status = status.value
 
     def set_gui_from_check(self, dt):
-        if GUILayout.check_are_paused == "False":
+        if GUILayout.service_playback_status == PlaybackStatus.PLAYING.value:
+            self.paused = False
+            GUILayout.playing_song = True
             self.set_gui_conditions(0, True, False, 1)
-        elif GUILayout.check_are_paused == "None":
+        elif GUILayout.service_playback_status == PlaybackStatus.IDLE.value:
+            self.paused = False
+            GUILayout.playing_song = False
             self.set_gui_conditions_from_none()
-        elif GUILayout.check_are_paused == "True":
+        elif GUILayout.service_playback_status == PlaybackStatus.PAUSED.value:
+            self.paused = True
+            GUILayout.playing_song = False
             self.set_gui_conditions(1, False, True, 0)
 
     @mainthread
@@ -322,6 +630,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.pause_btt.opacity = arg3
 
     def stop(self):
+        if hasattr(self, "_cancel_download_wait"):
+            self._cancel_download_wait()
         if GUILayout.slider is not None:
             GUILayout.slider.disabled = True
             GUILayout.slider.opacity = 0
@@ -335,9 +645,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.pause_btt.disabled = True
         MDApp.get_running_app().root.ids.pause_btt.opacity = 0
         MDApp.get_running_app().root.ids.repeat_btt.disabled = True
-        if GUILayout.playing_song is True:
+        with contextlib.suppress(Exception):
             GUILayout.send("stop", "stop music")
-        GUILayout.get_update_slider.cancel()
+        cancel_event(GUILayout.get_update_slider)
+        GUILayout.get_update_slider = None
+        cancel_event(getattr(self, "loadingosctimer", None))
+        self.loadingosctimer = None
+        GUILayout.playing_song = False
+        GUILayout.service_playback_status = PlaybackStatus.IDLE.value
 
     def next(self):
         self.set_next_previous_bttns()
@@ -358,8 +673,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def set_next_previous_bttns(self):
         self.paused = False
         GUILayout.playing_song = True
-        GUILayout.get_update_slider = Clock.schedule_interval(
-            GUILayout.wait_update_slider, 1
+        GUILayout.get_update_slider = replace_event(
+            GUILayout.get_update_slider,
+            lambda: Clock.schedule_interval(GUILayout.wait_update_slider, 1),
         )
         app = MDApp.get_running_app()
         app.root.ids.play_btt.disabled = True
@@ -390,6 +706,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             GUILayout.client.send_message("/stop", message)
         elif message_type == "playlist":
             GUILayout.client.send_message("/playlist", [message])
+        elif message_type == "navigation_mode":
+            GUILayout.client.send_message("/navigation_mode", message)
         elif message_type == "update_load_fs":
             GUILayout.client.send_message("/update_load_fs", message)
         elif message_type == "previous":
@@ -403,7 +721,23 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         elif message_type == "get_update_slider":
             GUILayout.client.send_message("/get_update_slider", message)
         elif message_type == "downloadyt":
-            GUILayout.client.send_message("/downloadyt", [message])
+            if utils.get_platform() == "android":
+                service_class, activity = _android_download_service_handles()
+                start_android_service(
+                    service_class,
+                    context=activity,
+                    argument=message,
+                )
+            else:
+                GUILayout.client.send_message("/downloadyt", [message])
+        elif message_type == "cancel_download":
+            client = (
+                GUILayout.download_client
+                if utils.get_platform() == "android"
+                else GUILayout.client
+            )
+            if client is not None:
+                client.send_message("/cancel_download", [message])
         elif message_type == "iampaused":
             GUILayout.client.send_message("/iampaused", message)
 
@@ -428,10 +762,16 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         songs, _ = self._active_playlist_song_names()
         payload = json.dumps(songs)
         GUILayout.send("playlist", payload)
-        if len(songs) >= 2 and getattr(GUILayout, "playing_song", False):
-            self.set_playlist(True, False, 1)
-        elif getattr(GUILayout, "playing_song", False):
-            self.set_playlist(False, True, 0)
+        if getattr(GUILayout, "playing_song", False):
+            if songs:
+                has_queue_navigation = len(songs) >= 2
+                self.set_playlist(
+                    True,
+                    not has_queue_navigation,
+                    1 if has_queue_navigation else 0,
+                )
+            else:
+                self.set_playlist(False, True, 0)
 
     def _update_active_playlist_badge(self):
         with contextlib.suppress(Exception):
@@ -485,13 +825,17 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def _playlist_refresh_sidebar(self):
         if not getattr(self, "library_tab", None):
             return
+        active = self._playlist_manager.active_playlist()
         data = [
-            {"pid": p.id, "name": p.name}
+            {
+                "pid": p.id,
+                "name": p.name,
+                "selected": bool(active and active.id == p.id),
+            }
             for p in self._playlist_manager.list_playlists()
         ]
         self.library_tab.ids.rv_playlists.data = data
         if not self.screen2_is_downloads:
-            active = self._playlist_manager.active_playlist()
             self.library_tab.ids.active_playlist_name.text = (
                 active.name if active else "Tracks"
             )
@@ -610,9 +954,17 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.library_tab.ids.active_playlist_name.text = "Tracks"
             self.library_tab.ids.rv_tracks.data = []
             return
+        # A restored active playlist can populate this panel before the user
+        # taps its row. Keep the screen mode aligned with what is visible.
+        self.screen2_is_downloads = False
         self.library_tab.ids.active_playlist_name.text = ap.name or "Playlist"
         rows = [
-            {"text": t.title, "index": idx} for idx, t in enumerate(ap.tracks or [])
+            {
+                "text": display_title_from_stem(t.title),
+                "index": idx,
+                "playlist_id": ap.id,
+            }
+            for idx, t in enumerate(ap.tracks or [])
         ]
         self.library_tab.ids.rv_tracks.data = rows
 
@@ -825,10 +1177,17 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 self._send_active_playlist_to_service()
             self.second_screen2()
 
-    def _playlist_play_index(self, index: int):
-        active = self._playlist_manager.active_playlist()
+    def _playlist_play_index(self, index: int, playlist_id: str = ""):
+        manager = self._playlist_manager
+        active = manager.active_playlist()
+        if playlist_id and (not active or active.id != playlist_id):
+            manager.set_active(playlist_id)
+            active = manager.active_playlist()
         if not active or not (0 <= index < len(active.tracks)):
             return
+        # Track rows are actionable on their own; selecting the matching row
+        # in the left pane first is not required.
+        self.screen2_is_downloads = False
         names = [os.path.basename(t.path) for t in active.tracks]
         if len(names) >= 2:
             self.set_playlist(True, False, 1)
@@ -855,13 +1214,19 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def __init__(self, **kwargs):
         super(GUILayout, self).__init__(**kwargs)
+        self.download_tracker = DownloadRequestTracker(
+            timeout_seconds=DOWNLOAD_INACTIVITY_TIMEOUT_SECONDS
+        )
         self.settitle = None
         self.fileosc_loaded = None
         self.length = None
         self.filetoplay = None
         self.popup = None
         self.play_btt = ObjectProperty(None)
-        self.second_screen()
+        if self._has_active_playlist():
+            self.second_screen2()
+        else:
+            self.second_screen(clear_active=False)
         self.pause_btt = ObjectProperty(None)
         self.paused = False
         self.stream = None
@@ -869,21 +1234,15 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.results_loaded = False
         self.video_search = None
         self.result = None
-        self.result1 = {}
-        self.file_loaded = False
+        self.result1: list[SearchResult] = []
+        self.selected_video_id = None
+        self._search_generation = 0
         self.playlist_mode = False
         self.repeat_selected = False
         self.shuffle_selected = False
-        if utils.get_platform() == "android":
-            self._start_music_service_user_initiated()
-        else:
-            GUILayout.service = Thread(
-                target=run_path,
-                args=[os.path.join(os.path.dirname(__file__), "./service/main.py")],
-                kwargs={"run_name": "__main__"},
-                daemon=True,
-            )
-            GUILayout.service.start()
+        self._service_reconnect_request_id = None
+        self._service_reconnect_retry = None
+        self._service_reconnect_timeout = None
         self.server = server = OSCThreadServer(encoding="utf8")
         server.listen(
             address=b"localhost",
@@ -897,18 +1256,21 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         server.bind("/reset_gui", self.reset_gui)
         server.bind("/file_is_downloaded", self.file_is_downloaded)
         server.bind("/data_info", self.update_info)
+        server.bind("/download_progress", self.download_progress)
+        server.bind("/download_result", self.download_result)
         server.bind("/are_we", self.check_are_we_playing)
+        server.bind("/playback_snapshot", self.apply_playback_snapshot)
         server.bind("/song_not_found", self.on_song_not_found)
         server.bind("/controls", self._controls)
         GUILayout.client = OSCClient("localhost", 3000, encoding="utf8")
+        GUILayout.download_client = OSCClient("localhost", 3001, encoding="utf8")
         GUILayout.song_local = [0]
         GUILayout.slider = None
         GUILayout.playing_song = False
-        GUILayout.check_are_paused = "None"
-        self.loadingosctimer = Clock.schedule_interval(self.waitingforoscload, 1)
-        GUILayout.get_update_slider = Clock.schedule_interval(
-            self.wait_update_slider, 1
-        )
+        GUILayout.service_playback_status = PlaybackStatus.IDLE.value
+        self.loadingosctimer = None
+        self.loadingfiletimer = None
+        GUILayout.get_update_slider = None
 
     def _has_active_playlist(self) -> bool:
         try:
@@ -924,12 +1286,19 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         except Exception:
             return "No active playlist"
 
-    def second_screen(self):
-        self._playlist_manager.clear_active()
+    def second_screen(self, *, clear_active: bool = True):
+        if clear_active:
+            self._playlist_manager.clear_active()
         self.screen2_is_downloads = True
         songs = self.get_play_list()
         uniq = list(dict.fromkeys(songs))
-        self.ids.rv.data = [{"text": str(x[:-4])} for x in uniq]
+        self.ids.rv.data = [
+            {
+                "text": display_title_from_stem(os.path.splitext(str(name))[0]),
+                "filename": str(name),
+            }
+            for name in uniq
+        ]
         with contextlib.suppress(Exception):
             self.ids.play_list.text = "Current Playlist: Downloaded"
         with contextlib.suppress(Exception):
@@ -950,11 +1319,17 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             ap = None
 
         if not ap:
-            self.second_screen()
+            self.second_screen(clear_active=False)
             return
 
         uniq = list(dict.fromkeys(songs))
-        self.ids.rv.data = [{"text": str(x[:-4])} for x in uniq]
+        self.ids.rv.data = [
+            {
+                "text": display_title_from_stem(os.path.splitext(str(name))[0]),
+                "filename": str(name),
+            }
+            for name in uniq
+        ]
         with contextlib.suppress(Exception):
             self.ids.play_list.text = f"Current Playlist: {ap.name or 'Playlist'}"
         self.screen2_is_downloads = False
@@ -1096,7 +1471,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             if utils.get_platform() == "android":
                 MDApp.get_running_app().root.ids.imageView.size_hint_x = 0.7
                 MDApp.get_running_app().root.ids.imageView.size_hint_y = 0.7
-        self.settitle = message[:-4]
+        stored_stem = os.path.splitext(os.path.basename(message))[0]
+        self.settitle = display_title_from_stem(stored_stem)
         if len(self.settitle) > 51:
             settitle1 = f"{self.settitle[:51]}..."
         else:
@@ -1105,6 +1481,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
         if GUILayout.slider is None:
             self.make_slider()
+        self.playlist_mode = True
         self.playing()
 
     @mainthread
@@ -1126,36 +1503,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.stream = os.path.join(self.set_local_download, filename)
         self.set_local = os.path.join(self.set_local_download, f"{base}.jpg")
         if not os.path.exists(self.set_local):
-            try:
-                jpgs = [
-                    f
-                    for f in os.listdir(self.set_local_download)
-                    if f.lower().endswith(".jpg")
-                ]
-                for jpg in jpgs:
-                    img_base, _ = os.path.splitext(jpg)
-                    if img_base in base or base in img_base:
-                        old_audio = self.stream
-                        new_audio = os.path.join(
-                            self.set_local_download, f"{img_base}.m4a"
-                        )
-                        if os.path.exists(old_audio) and not os.path.exists(new_audio):
-                            os.rename(old_audio, new_audio)
-                        self.stream = new_audio
-                        self.set_local = os.path.join(
-                            self.set_local_download, f"{img_base}.jpg"
-                        )
-                        base = img_base
-                        break
-            except Exception as e:
-                print(f"[ui] optional rename/repair failed: {e}")
+            self.set_local = default_cover_path()
         with contextlib.suppress(Exception):
             MDApp.get_running_app().root.ids.imageView.source = str(self.set_local)
             if utils.get_platform() == "android":
                 MDApp.get_running_app().root.ids.imageView.size_hint_x = 0.7
                 MDApp.get_running_app().root.ids.imageView.size_hint_y = 0.7
 
-        self.settitle = base
+        self.settitle = display_title_from_stem(base)
         settitle1 = (
             f"{self.settitle[:51]}..." if len(self.settitle) > 51 else self.settitle
         )
@@ -1200,34 +1555,87 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             GUILayout.slider.disabled = True
             GUILayout.slider.opacity = 0
         self.playlist_mode = False
+        GUILayout.send("navigation_mode", "search")
         self.count = 0
         self.results_loaded = False
         self.retrieve_text()
 
     def retrieve_text(self):
+        # Invalidate any older worker even when this request exits early (for
+        # example, when both the search field and current title are empty).
+        self._search_generation += 1
+        generation = self._search_generation
         GUILayout.send("update_load_fs", "update_load_fs")
         self.paused = False
         self.gui_reset = True
         self.stop()
-        if self.results_loaded is False:
-            try:
-                search_text = str(MDApp.get_running_app().root.ids.input_box.text)
-                if search_text != "":
-                    self.video_search = VideosSearch(search_text)
-                elif MDApp.get_running_app().root.ids.song_title.text != "":
-                    self.video_search = VideosSearch(
-                        MDApp.get_running_app().root.ids.song_title.text
-                    )
-                else:
-                    return
-            except TypeError as e:
-                self.error_reset("search")
-                return
-            self.result = self.video_search.result()
-            self.result1 = self.result["result"]
-            self.results_loaded = True
-            if MDApp.get_running_app().root.ids.input_box.text == "":
-                return
+        if self.results_loaded:
+            self._show_search_result()
+            return
+
+        ids = MDApp.get_running_app().root.ids
+        search_text = str(ids.input_box.text or "").strip()
+        if not search_text:
+            search_text = str(ids.song_title.text or "").strip()
+        if not search_text:
+            return
+
+        ids.info.text = "Searching..."
+        ids.play_btt.disabled = True
+        ids.play_btt.opacity = 0
+        ids.next_btt.disabled = True
+        ids.previous_btt.disabled = True
+        Thread(
+            target=self._run_search,
+            args=(generation, search_text),
+            name=f"VideoSearch-{generation}",
+            daemon=True,
+        ).start()
+
+    def _run_search(self, generation: int, search_text: str):
+        results: list[SearchResult] = []
+        error = ""
+        try:
+            search = VideosSearch(search_text)
+            results = parse_search_results(search.result())
+        except Exception as exc:
+            error = str(exc) or "Search request failed."
+        Clock.schedule_once(
+            lambda _dt, g=generation, r=results, e=error: (
+                self._receive_search_results(g, r, e)
+            ),
+            0,
+        )
+
+    @mainthread
+    def _receive_search_results(
+        self,
+        generation: int,
+        results: list[SearchResult],
+        error: str,
+    ):
+        if generation != self._search_generation:
+            return
+        if error or not results:
+            self.results_loaded = False
+            self.result1 = []
+            self._reset_to_startup_gui()
+            self.ids.info.text = (
+                "Error searching music. Check your connection and try again."
+                if error
+                else "No matching music was found."
+            )
+            return
+        self.result1 = results
+        self.results_loaded = True
+        self.count %= len(results)
+        self._show_search_result()
+
+    def _show_search_result(self):
+        if not self.result1:
+            self._reset_to_startup_gui()
+            self.ids.info.text = "No matching music was found."
+            return
         if GUILayout.slider is None:
             GUILayout.slider = MySlider(
                 orientation="horizontal",
@@ -1242,22 +1650,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 step=1,
             )
             MDApp.get_running_app().root.ids.screen_1.add_widget(GUILayout.slider)
-        if self.results_loaded is False:
-            self.video_search = VideosSearch(
-                MDApp.get_running_app().root.ids.input_box.text
-            )
-            self.result = self.video_search.result()
-            self.result1 = self.result["result"]
-            self.results_loaded = True
-        try:
-            resultdict = self.result1[self.count]
-        except IndexError:
-            self.count = 0
-            resultdict = self.result1[self.count]
-        self.setytlink = resultdict["link"]
-        thumbnail = resultdict["thumbnails"]
-        self.set_local = thumbnail[0]["url"]
-        self.settitle = utils.safe_filename(resultdict["title"])
+        self.count %= len(self.result1)
+        result = self.result1[self.count]
+        self.setytlink = result.link
+        self.selected_video_id = result.media_id
+        self.set_local = result.thumbnail_url or default_cover_path()
+        self.settitle = utils.safe_filename(result.title)
         with contextlib.suppress(Exception):
             MDApp.get_running_app().root.ids.imageView.source = str(self.set_local)
             if utils.get_platform() == "android":
@@ -1278,72 +1676,204 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.repeat_btt.opacity = 1
         MDApp.get_running_app().root.ids.next_btt.opacity = 1
         MDApp.get_running_app().root.ids.previous_btt.opacity = 1
+        MDApp.get_running_app().root.ids.info.text = ""
 
     def error_reset(self, msg):
+        self._reset_to_startup_gui()
         MDApp.get_running_app().root.ids.imageView.source = default_cover_path()
         if msg == "search":
             MDApp.get_running_app().root.ids.info.text = "Error Searching Music"
         elif msg == "download":
             MDApp.get_running_app().root.ids.info.text = "Error downloading Music"
-        self._reset_to_startup_gui()
         self.paused = False
-        self.file_loaded = False
 
     @mainthread
-    def download_yt(self):
+    def download_yt(self, request_id):
         MDApp.get_running_app().root.ids.next_btt.disabled = True
         MDApp.get_running_app().root.ids.previous_btt.disabled = True
         MDApp.get_running_app().root.ids.info.text = "Downloading audio... Please wait"
         payload = json.dumps(
-            [self.setytlink, self.settitle, self.set_local, self.set_local_download]
+            {
+                "request_id": request_id,
+                "url": self.setytlink,
+                "title": self.settitle,
+                "video_id": self.selected_video_id,
+                "thumbnail_url": self.set_local,
+                "download_dir": self.set_local_download,
+            }
         )
-        GUILayout.send("downloadyt", payload)
+        try:
+            GUILayout.send("downloadyt", payload)
+        except Exception as exc:
+            self.download_result(
+                json.dumps(
+                    {
+                        "request_id": request_id,
+                        "status": "error",
+                        "message": f"Unable to start download service: {exc}",
+                    }
+                )
+            )
 
     @mainthread
     def file_is_downloaded(self, *val):
+        """Accept legacy service results during the playback protocol transition."""
         maybe = "".join(val)
         if maybe == "nope":
-            self.error_reset("download")
+            message = self.ids.info.text or "Download failed. Tap Play to retry."
+            self._restore_after_download_failure(message)
         elif maybe == "yep":
-            self.sync_playlist_set_load()
+            self._complete_download_success()
+
+    @mainthread
+    def download_progress(self, *val):
+        try:
+            payload = json.loads("".join(val))
+            request_id = str(payload.get("request_id") or "")
+            message = str(payload.get("message") or "")
+        except (AttributeError, json.JSONDecodeError, TypeError, ValueError):
+            return
+        if not self.download_tracker.touch(request_id, now=time.monotonic()):
+            return
+        self.ids.info.text = "Downloading audio... Please wait\n" f"{message}"
+
+    @mainthread
+    def download_result(self, *val):
+        try:
+            payload = json.loads("".join(val))
+            request_id = str(payload.get("request_id") or "")
+            status = str(payload.get("status") or "")
+            message = str(payload.get("message") or "")
+            audio_path = payload.get("audio_path")
+        except (AttributeError, json.JSONDecodeError, TypeError, ValueError):
+            return
+        if not self.download_tracker.accepts(request_id):
+            return
+        if status != "success":
+            self._restore_after_download_failure(
+                message or "Download failed. Tap Play to retry."
+            )
+            return
+        expected = os.path.normcase(os.path.realpath(self.filetoplay or ""))
+        reported = os.path.normcase(os.path.realpath(str(audio_path or "")))
+        if not expected or reported != expected or not os.path.isfile(expected):
+            self._restore_after_download_failure(
+                "Download finished without the expected audio file. Tap Play to retry."
+            )
+            return
+        self._complete_download_success()
 
     @mainthread
     def update_info(self, *val):
         msg = "".join(val)
-        MDApp.get_running_app().root.ids.info.text = (
-            "Downloading audio... Please wait\n" f"{msg}"
+        if self.download_tracker.active_id:
+            self.download_tracker.touch(
+                self.download_tracker.active_id,
+                now=time.monotonic(),
+            )
+            MDApp.get_running_app().root.ids.info.text = (
+                "Downloading audio... Please wait\n" f"{msg}"
+            )
+            return
+        MDApp.get_running_app().root.ids.info.text = msg
+
+    def _cancel_download_wait(self, *, notify_service: bool = True):
+        cancel_event(self.loadingfiletimer)
+        self.loadingfiletimer = None
+        tracker = getattr(self, "download_tracker", None)
+        if tracker is not None:
+            request_id = tracker.active_id
+            tracker.cancel()
+            if notify_service and request_id:
+                with contextlib.suppress(Exception):
+                    GUILayout.send(
+                        "cancel_download",
+                        json.dumps({"request_id": request_id}),
+                    )
+
+    def _restore_after_download_failure(self, message):
+        self._cancel_download_wait()
+        self.paused = False
+        GUILayout.playing_song = False
+        GUILayout.service_playback_status = PlaybackStatus.IDLE.value
+        ids = MDApp.get_running_app().root.ids
+        ids.info.text = str(message)
+        ids.play_btt.disabled = False
+        ids.play_btt.opacity = 1
+        ids.pause_btt.disabled = True
+        ids.pause_btt.opacity = 0
+        ids.next_btt.disabled = False
+        ids.previous_btt.disabled = False
+
+    def _complete_download_success(self):
+        self._cancel_download_wait(notify_service=False)
+        if not self.filetoplay or not os.path.isfile(self.filetoplay):
+            self._restore_after_download_failure(
+                "Downloaded audio file was not found. Tap Play to retry."
+            )
+            return
+        self.sync_playlist_set_load()
+        # The downloaded file is now part of the active playlist, or the
+        # Downloads queue when no playlist is selected.
+        self.playlist_mode = True
+        self.play_it()
+
+    def _check_download_timeout(self, dt):
+        if self.download_tracker.active_id is None:
+            return False
+        if not self.download_tracker.expired(now=time.monotonic()):
+            return True
+        self._restore_after_download_failure(
+            "The download stopped responding. Tap Play to retry."
         )
+        return False
 
     def checkfile(self):
         MDApp.get_running_app().root.ids.play_btt.disabled = True
         MDApp.get_running_app().root.ids.info.text = ""
         MDApp.get_running_app().root.ids.song_position.text = ""
         MDApp.get_running_app().root.ids.song_max.text = ""
-        self.filetoplay = (
-            f"{self.set_local_download}//{self.settitle}"
-            if self.settitle.strip()[-4:] == ".m4a"
-            else f"{self.set_local_download}//{self.settitle.strip()}.m4a"
-        )
+        title = str(self.settitle or "").strip()
+        if not title:
+            self._restore_after_download_failure("No track is selected.")
+            return
+        media_id = str(getattr(self, "selected_video_id", "") or "").strip()
+        if not media_id:
+            media_id = stable_media_id(str(getattr(self, "setytlink", "") or ""))
+            self.selected_video_id = media_id
+        filename = audio_filename(title, media_id)
+        self.filetoplay = os.path.join(self.set_local_download, filename)
         if os.path.isfile(self.filetoplay):
-            self.sync_playlist_set_load()
-        else:
-            self.file_loaded = False
-            loadingfile = Thread(target=self.download_yt, daemon=True)
-            loadingfile.start()
-        self.loadingfiletimer = Clock.schedule_interval(self.waitingforload, 1)
-        self.loadingfiletimer()
+            self._complete_download_success()
+            return
+        if not getattr(self, "setytlink", None):
+            self._restore_after_download_failure(
+                "The selected track is not available to download."
+            )
+            return
+        self._cancel_download_wait()
+        request_id = uuid.uuid4().hex
+        self.download_tracker.begin(request_id, now=time.monotonic())
+        GUILayout.service_playback_status = PlaybackStatus.LOADING.value
+        self.download_yt(request_id)
+        self.loadingfiletimer = replace_event(
+            self.loadingfiletimer,
+            lambda: Clock.schedule_interval(self._check_download_timeout, 1),
+        )
 
     def set_title_refresh_playlist(self, apm, ap):
-        title = utils.safe_filename((self.settitle or "").strip())
-        fname = title if title.endswith(".m4a") else f"{title}.m4a"
-        full_path = os.path.join(self.set_local_download, fname)
-
-        apm.add_tracks(ap.id, [full_path])
+        full_path = self.filetoplay
+        if not full_path:
+            return
+        apm.add_tracks(
+            ap.id,
+            [full_path],
+            video_id=getattr(self, "selected_video_id", None),
+        )
         with contextlib.suppress(Exception):
             self._playlist_refresh_tracks()
 
     def sync_playlist_set_load(self):
-        self.file_loaded = True
         with contextlib.suppress(Exception):
             apm = getattr(self, "_playlist_manager", None)
             ap = apm.active_playlist() if apm else None
@@ -1356,18 +1886,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         with contextlib.suppress(Exception):
             self._send_active_playlist_to_service()
 
-    def waitingforload(self, dt):
-        if self.file_loaded is True:
-            self.file_loaded = False
-            self.play_it()
-            self.loadingfiletimer.cancel()
-        elif self.file_loaded is False:
-            pass
-        elif self.file_loaded is None:
-            self.file_loaded = False
-            self.stop()
-            self.loadingfiletimer.cancel()
-
     def play_it(self):
         self.stream = self.filetoplay
         MDApp.get_running_app().root.ids.info.text = ""
@@ -1376,8 +1894,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.previous_btt.disabled = False
 
     def playing(self):
-        GUILayout.get_update_slider = Clock.schedule_interval(
-            self.wait_update_slider, 1
+        GUILayout.get_update_slider = replace_event(
+            GUILayout.get_update_slider,
+            lambda: Clock.schedule_interval(self.wait_update_slider, 1),
         )
         if not getattr(self, "screen2_is_downloads", False):
             self._send_active_playlist_to_service()
@@ -1394,9 +1913,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.song_position.opacity = 1
         MDApp.get_running_app().root.ids.song_max.opacity = 1
         GUILayout.playing_song = True
+        GUILayout.service_playback_status = PlaybackStatus.PLAYING.value
         if self.paused is False:
+            GUILayout.service_playback_status = PlaybackStatus.LOADING.value
+            self.loadingosctimer = replace_event(
+                self.loadingosctimer,
+                lambda: Clock.schedule_interval(self.waitingforoscload, 1),
+            )
             self.load_file()
-            self.loadingosctimer()
         else:
             GUILayout.send("play", "play")
 
@@ -1408,7 +1932,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if self.fileosc_loaded is True:
             self.fileosc_loaded = False
             self.updating_gui_slider()
-            self.loadingosctimer.cancel()
+            cancel_event(self.loadingosctimer)
+            self.loadingosctimer = None
 
     def updating_gui_slider(self):
         self.count = 0
@@ -1445,9 +1970,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     @mainthread
     def update_slider(self, *val):
         self.song_pos = float("".join(val))
+        if GUILayout.slider is None or self.length is None:
+            return
         if not getattr(GUILayout, "is_scrubbing", False):
             GUILayout.slider.value = self.song_pos
-        settext = self.length - self.song_pos
+        settext = max(0.0, self.length - self.song_pos)
         ty_res = time.gmtime(settext)
         res = time.strftime("%H:%M:%S", ty_res)
         if str(res[:2]) == "00":
@@ -1496,7 +2023,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def pause(self):
         self.paused = True
         GUILayout.playing_song = False
-        GUILayout.get_update_slider.cancel()
+        GUILayout.service_playback_status = PlaybackStatus.PAUSED.value
+        cancel_event(GUILayout.get_update_slider)
+        GUILayout.get_update_slider = None
         GUILayout.send("pause", "pause")
         MDApp.get_running_app().root.ids.pause_btt.disabled = True
         MDApp.get_running_app().root.ids.play_btt.disabled = False
@@ -1510,8 +2039,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.paused = False
         self.playlist_mode = False
         GUILayout.playing_song = False
+        GUILayout.service_playback_status = PlaybackStatus.IDLE.value
         with contextlib.suppress(Exception):
-            GUILayout.get_update_slider.cancel()
+            cancel_event(GUILayout.get_update_slider)
+            GUILayout.get_update_slider = None
+        cancel_event(getattr(self, "loadingosctimer", None))
+        self.loadingosctimer = None
         Clock.schedule_once(lambda dt: self.set_gui_conditions_from_none(), 0)
 
     def _playlist_open_reorder_dialog(self):
@@ -1651,6 +2184,21 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         _refresh_grid()
         dlg.open()
 
+    def on_app_close(self):
+        """Cancel owned callbacks and stop local OSC activity on application exit."""
+
+        self._cancel_service_reconnect()
+        cancel_event(GUILayout.get_update_slider)
+        GUILayout.get_update_slider = None
+        cancel_event(getattr(self, "loadingfiletimer", None))
+        self.loadingfiletimer = None
+        cancel_event(getattr(self, "loadingosctimer", None))
+        self.loadingosctimer = None
+        with contextlib.suppress(Exception):
+            GUILayout.send("stop", "app closing")
+        with contextlib.suppress(Exception):
+            self.server.stop_all()
+
 
 class Musicapp(MDApp):
 
@@ -1662,10 +2210,8 @@ class Musicapp(MDApp):
         Window.bind(size=lambda *a: self._update_ui_scale())
 
     def _update_ui_scale(self):
-        w, h = Window.size
-        base = 411.0
-        raw = (min(w, h) / base) if base else 1.0
-        self.ui_scale = max(0.85, min(1.35, raw))
+        w, h = Window.system_size
+        self.ui_scale = bounded_ui_scale(w, h)
 
     def spx(self, value: float) -> float:
         """Scaled sp() you can call from KV: app.spx(14) etc."""
@@ -1675,7 +2221,8 @@ class Musicapp(MDApp):
         """Return a valid local path for a track thumbnail, or the default cover."""
         base = get_app_writable_dir("Downloaded/Played")
         os.makedirs(base, exist_ok=True)
-        fname = f"{utils.safe_filename(title)}.jpg"
+        stem = os.path.splitext(os.path.basename(title))[0]
+        fname = f"{utils.safe_filename(stem)}.jpg"
         path = os.path.join(base, fname)
         return path if os.path.exists(path) else default_cover_path()
 
@@ -1683,14 +2230,24 @@ class Musicapp(MDApp):
         """Called by Kivy when the app is closing."""
         self._cleanup_on_exit()
 
+    def on_start(self):
+        """Connect after build(), when the GUI OSC listener is available."""
+
+        _apply_android_system_bar_insets()
+        Clock.schedule_once(self._resume_handshake, 0)
+
     def _cleanup_on_exit(self):
         """Centralized shutdown path; safe to call multiple times."""
-        gs = getattr(self, "gui_sounds", None)
-        if gs and hasattr(gs, "on_app_close"):
+        if getattr(self, "_cleanup_complete", False):
+            return
+        root = getattr(self, "root", None)
+        if root and hasattr(root, "on_app_close"):
             try:
-                gs.on_app_close()
+                root.on_app_close()
             except Exception as e:
                 print("on_app_close error:", e)
+        self.stop_service()
+        self._cleanup_complete = True
 
     def _on_keyboard(self, window, key, scancode, codepoint, modifier):
         if key in (27, 1001):
@@ -1722,20 +2279,29 @@ class Musicapp(MDApp):
         return GUILayout(store=self._store)
 
     def stop_service(self):
-        if GUILayout.service:
-            if utils.get_platform() == "android":
-                GUILayout.service.stop(GUILayout.service_activity)
-            elif platform in ("linux", "linux2", "macosx", "win"):
-                return
-            else:
-                raise NotImplementedError(
-                    "service start not implemented on this platform"
+        if utils.get_platform() == "android":
+            try:
+                service_class, activity = _android_music_service_handles()
+                GUILayout.service_started = stop_android_service(
+                    service_class,
+                    context=activity,
+                    started=GUILayout.service_started,
                 )
-            GUILayout.service = None
+            except Exception as exc:
+                print("[service] stop failed:", exc)
+            return
+        if platform in ("linux", "linux2", "macosx", "win"):
+            return
+        raise NotImplementedError("service stop not implemented on this platform")
 
     def on_pause(self):
-        GUILayout.get_update_slider.cancel()
-        GUILayout.send("iampaused", ":(")
+        root = getattr(self, "root", None)
+        if root and hasattr(root, "_cancel_service_reconnect"):
+            root._cancel_service_reconnect()
+        cancel_event(GUILayout.get_update_slider)
+        GUILayout.get_update_slider = None
+        with contextlib.suppress(Exception):
+            GUILayout.send("iampaused", ":(")
         return True
 
     def on_resume(self):
@@ -1749,119 +2315,16 @@ class Musicapp(MDApp):
 
     @mainthread
     def _resume_handshake(self, *args):
-        """Run on the main thread: safely re-sync UI with playback state."""
-        root = self.root
-        GUILayout.send("iamawake", "hello")
+        """Re-sync this GUI process with the persistent playback service."""
 
-        with contextlib.suppress(Exception):
-            if GUILayout.slider is not None:
-                GUILayout.slider.disabled = True
-        with contextlib.suppress(Exception):
-            if hasattr(root.ids, "next_btt"):
-                root.ids.next_btt.disabled = True
-            if hasattr(root.ids, "previous_btt"):
-                root.ids.previous_btt.disabled = True
-        with contextlib.suppress(Exception):
-            if getattr(root, "get_update_slider", None):
-                root.get_update_slider.cancel()
-                Clock.unschedule(getattr(root, "get_update_slider", None))
-                Clock.unschedule(getattr(GUILayout, "get_update_slider", None))
-        with contextlib.suppress(Exception):
-            root.get_update_slider = Clock.schedule_interval(root.wait_update_slider, 1)
-
-        def _apply_playing_state():
-            with contextlib.suppress(Exception):
-                if getattr(GUILayout, "slider", None) is not None:
-                    GUILayout.slider.disabled = False
-                    GUILayout.slider.opacity = 1
-            with contextlib.suppress(Exception):
-                if hasattr(root.ids, "next_btt"):
-                    root.ids.next_btt.disabled = False
-                    root.ids.next_btt.opacity = 1
-                if hasattr(root.ids, "previous_btt"):
-                    root.ids.previous_btt.disabled = False
-                    root.ids.previous_btt.opacity = 1
-            with contextlib.suppress(Exception):
-                if hasattr(root.ids, "song_position"):
-                    root.ids.song_position.opacity = 1
-                if hasattr(root.ids, "song_max"):
-                    root.ids.song_max.opacity = 1
-            GUILayout.check_are_paused = "False"
-            root.set_gui_from_check(0)
-
-        def _apply_no_track_state():
-            with contextlib.suppress(Exception):
-                if GUILayout.slider is not None:
-                    GUILayout.slider.disabled = True
-                    GUILayout.slider.opacity = 0
-            with contextlib.suppress(Exception):
-                if hasattr(root.ids, "next_btt"):
-                    root.ids.next_btt.disabled = True
-                    root.ids.next_btt.opacity = 0
-                if hasattr(root.ids, "previous_btt"):
-                    root.ids.previous_btt.disabled = True
-                    root.ids.previous_btt.opacity = 0
-            with contextlib.suppress(Exception):
-                root.set_gui_conditions_from_none()
-
-        def _apply_paused_state():
-            with contextlib.suppress(Exception):
-                if GUILayout.slider is not None:
-                    GUILayout.slider.disabled = False
-                    GUILayout.slider.opacity = 1
-            with contextlib.suppress(Exception):
-                if hasattr(root.ids, "next_btt"):
-                    root.ids.next_btt.disabled = False
-                    root.ids.next_btt.opacity = 1
-                if hasattr(root.ids, "previous_btt"):
-                    root.ids.previous_btt.disabled = False
-                    root.ids.previous_btt.opacity = 1
-            with contextlib.suppress(Exception):
-                if hasattr(root.ids, "song_position"):
-                    root.ids.song_position.opacity = 1
-                if hasattr(root.ids, "song_max"):
-                    root.ids.song_max.opacity = 1
-
-            GUILayout.check_are_paused = "True"
-            root.set_gui_from_check(0)
-
-        poll_ev = {"ev": None}
-        timeout_ev = {"ev": None}
-
-        def _poll(dt):
-            paused = getattr(GUILayout, "check_are_paused", "None")
-            if paused == "False":
-                _stop_all()
-                _apply_playing_state()
-            elif paused == "True":
-                _stop_all()
-                _apply_paused_state()
-            else:
-                return
-
-        def _stop_all():
-            with contextlib.suppress(Exception):
-                Clock.unschedule(poll_ev["ev"])
-            with contextlib.suppress(Exception):
-                Clock.unschedule(timeout_ev["ev"])
-
-        def _timeout(dt):
-            _stop_all()
-            _apply_no_track_state()
-
-        poll_ev["ev"] = Clock.schedule_interval(_poll, 0.25)
-        timeout_ev["ev"] = Clock.schedule_once(_timeout, 10.0)
+        self.root.begin_service_reconnect()
         Clock.schedule_once(lambda dt: Window.canvas.ask_update(), 0)
 
 
 if __name__ == "__main__":
-    python_files = [
-        file
-        for file in os.listdir()
-        if file.endswith(".webm") or file.endswith(".ytdl") or file.endswith(".part")
-    ]
-    for file in python_files:
-        with contextlib.suppress(PermissionError):
-            os.remove(file)
-    Musicapp().run()
-    Musicapp().stop_service()
+    cleanup_download_artifacts(get_app_writable_dir("Downloaded/Played"))
+    app = Musicapp()
+    try:
+        app.run()
+    finally:
+        app.stop_service()

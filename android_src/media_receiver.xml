@@ -1,0 +1,5 @@
+<receiver
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:name="com.youtubemusicplayer.bridge.MusicControlReceiver"
+    android:enabled="true"
+    android:exported="false" />

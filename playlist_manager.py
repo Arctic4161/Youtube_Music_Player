@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import shutil
 import time
@@ -15,6 +16,49 @@ from utils import get_app_writable_dir, safe_filename
 
 DEFAULT_REL_SUBDIR = "Downloaded/Played"
 PLAYLIST_FILENAME = "playlists.json"
+PLAYLIST_BACKUP_SUFFIX = ".bak"
+
+
+def _empty_playlist_payload() -> dict:
+    return {"playlists": [], "active_playlist_id": None}
+
+
+def _validate_playlist_payload(raw: object) -> dict:
+    """Reject malformed-but-valid JSON before it reaches the model loader."""
+
+    if not isinstance(raw, dict):
+        raise ValueError("playlist data must be an object")
+    playlists = raw.get("playlists", [])
+    active_id = raw.get("active_playlist_id")
+    if not isinstance(playlists, list):
+        raise ValueError("playlists must be a list")
+    if active_id is not None and not isinstance(active_id, str):
+        raise ValueError("active_playlist_id must be a string or null")
+    for playlist in playlists:
+        if not isinstance(playlist, dict):
+            raise ValueError("each playlist must be an object")
+        if "id" in playlist and not isinstance(playlist["id"], str):
+            raise ValueError("playlist id must be a string")
+        if "name" in playlist and not isinstance(playlist["name"], str):
+            raise ValueError("playlist name must be a string")
+        tracks = playlist.get("tracks", [])
+        if not isinstance(tracks, list):
+            raise ValueError("playlist tracks must be a list")
+        for track in tracks:
+            if not isinstance(track, dict):
+                raise ValueError("each track must be an object")
+            for key in ("title", "path", "thumb", "video_id"):
+                value = track.get(key)
+                if value is not None and not isinstance(value, str):
+                    raise ValueError(f"track {key} must be a string or null")
+            duration = track.get("duration", 0.0)
+            try:
+                duration_value = float(duration)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("track duration must be numeric") from exc
+            if not math.isfinite(duration_value) or duration_value < 0.0:
+                raise ValueError("track duration must be finite and non-negative")
+    return raw
 
 
 @dataclass
@@ -23,6 +67,7 @@ class Track:
     path: str
     duration: float = 0.0
     thumb: Optional[str] = None
+    video_id: Optional[str] = None
 
 
 @dataclass
@@ -51,6 +96,10 @@ class PlaylistManager:
             "playlists": [],
             "active_playlist_id": None,
         }
+        self.load_error: Optional[str] = None
+        self.recovered_from_backup = False
+        self.corrupt_backup_path: Optional[str] = None
+        self._corrupt_source_pending = False
         self.load()
 
     def to_dict(self) -> dict:
@@ -63,9 +112,19 @@ class PlaylistManager:
         }
 
     def load_from_dict(self, raw: dict) -> None:
+        raw = _validate_playlist_payload(raw)
         playlists = []
         for p in raw.get("playlists", []):
-            tracks = [Track(**t) for t in p.get("tracks", [])]
+            tracks = [
+                Track(
+                    title=str(t.get("title") or ""),
+                    path=str(t.get("path") or ""),
+                    duration=float(t.get("duration", 0.0)),
+                    thumb=t.get("thumb"),
+                    video_id=t.get("video_id"),
+                )
+                for t in p.get("tracks", [])
+            ]
             playlists.append(
                 Playlist(
                     id=p.get("id", str(uuid.uuid4())),
@@ -82,14 +141,30 @@ class PlaylistManager:
         """
         root = get_app_writable_dir("Downloaded/Played")
 
+        backup_path = f"{self.storage_path}{PLAYLIST_BACKUP_SUFFIX}"
+        raw = _empty_playlist_payload()
         if os.path.exists(self.storage_path):
             try:
                 with open(self.storage_path, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
-            except Exception:
-                raw = {}
-        else:
-            raw = {}
+                    raw = _validate_playlist_payload(json.load(f))
+            except Exception as exc:
+                self.load_error = str(exc)
+                self._corrupt_source_pending = True
+                if os.path.exists(backup_path):
+                    try:
+                        with open(backup_path, "r", encoding="utf-8") as f:
+                            raw = _validate_playlist_payload(json.load(f))
+                        self.recovered_from_backup = True
+                    except Exception:
+                        raw = _empty_playlist_payload()
+        elif os.path.exists(backup_path):
+            try:
+                with open(backup_path, "r", encoding="utf-8") as f:
+                    raw = _validate_playlist_payload(json.load(f))
+                self.recovered_from_backup = True
+            except Exception as exc:
+                self.load_error = str(exc)
+                raw = _empty_playlist_payload()
 
         playlists: List[Playlist] = []
         for p in raw.get("playlists", []):
@@ -110,7 +185,7 @@ class PlaylistManager:
                 ):
                     name = os.path.splitext(os.path.basename(name))[0]
 
-                dur = t.get("duration", 0.0)
+                dur = float(t.get("duration", 0.0))
 
                 thumb = t.get("thumb")
                 if thumb and not os.path.isabs(thumb):
@@ -127,7 +202,15 @@ class PlaylistManager:
                         if os.path.exists(cand2):
                             thumb = cand2
 
-                tr.append(Track(title=name, path=raw_path, duration=dur, thumb=thumb))
+                tr.append(
+                    Track(
+                        title=name,
+                        path=raw_path,
+                        duration=dur,
+                        thumb=thumb,
+                        video_id=t.get("video_id"),
+                    )
+                )
 
             pl = Playlist(
                 id=p.get("id", str(uuid.uuid4())),
@@ -136,15 +219,40 @@ class PlaylistManager:
             )
             playlists.append(pl)
 
-        self.create_and_save_playlist(playlists, raw)
+        self._set_loaded_data(playlists, raw)
 
-    def create_and_save_playlist(self, playlists, raw):
+    def _set_loaded_data(self, playlists: List[Playlist], raw: dict) -> None:
         self.data["playlists"] = playlists
         pid = raw.get("active_playlist_id")
         self.data["active_playlist_id"] = (
             pid if any(p.id == pid for p in playlists) else None
         )
+
+    def create_and_save_playlist(self, playlists, raw):
+        self._set_loaded_data(playlists, raw)
         self.save()
+
+    def _preserve_corrupt_source(self) -> None:
+        if not self._corrupt_source_pending or not os.path.exists(self.storage_path):
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        preserved = f"{self.storage_path}.corrupt-{stamp}"
+        shutil.copy2(self.storage_path, preserved)
+        self.corrupt_backup_path = preserved
+        self._corrupt_source_pending = False
+
+    def _backup_current_valid_file(self) -> None:
+        if not os.path.exists(self.storage_path):
+            return
+        try:
+            with open(self.storage_path, "r", encoding="utf-8") as fh:
+                _validate_playlist_payload(json.load(fh))
+        except Exception:
+            return
+        backup_path = f"{self.storage_path}{PLAYLIST_BACKUP_SUFFIX}"
+        backup_tmp = f"{backup_path}.tmp"
+        shutil.copy2(self.storage_path, backup_tmp)
+        os.replace(backup_tmp, backup_path)
 
     def save(self) -> None:
         """
@@ -183,7 +291,9 @@ class PlaylistManager:
             serial["playlists"].append({"id": p.id, "name": p.name, "tracks": tracks})
 
         tmp = f"{self.storage_path}.tmp"
-        os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.storage_path) or ".", exist_ok=True)
+        self._preserve_corrupt_source()
+        self._backup_current_valid_file()
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(serial, f, ensure_ascii=False, indent=2)
             f.flush()
@@ -224,10 +334,15 @@ class PlaylistManager:
         self.data["playlists"] = [p for p in self.data["playlists"] if p.id != pid]
         if self.data.get("active_playlist_id") == pid:
             self.data["active_playlist_id"] = None
-        self.clear_active()
         self.save()
 
-    def add_tracks(self, pid: str, paths: List[str]) -> None:
+    def add_tracks(
+        self,
+        pid: str,
+        paths: List[str],
+        *,
+        video_id: Optional[str] = None,
+    ) -> None:
         p = self._find(pid)
         if not p:
             return
@@ -270,7 +385,15 @@ class PlaylistManager:
             title = safe_name
 
             key = _abs_norm(path)
-            if not key or key in existing or key in seen_batch:
+            if not key or key in seen_batch:
+                continue
+            if key in existing:
+                if video_id:
+                    for existing_track in p.tracks:
+                        if _abs_norm(existing_track.path) == key and not existing_track.video_id:
+                            existing_track.video_id = video_id
+                            added_any = True
+                            break
                 continue
 
             rel_or_abs = _to_rel_if_in_sandbox(path)
@@ -282,7 +405,14 @@ class PlaylistManager:
                 if os.path.exists(cand):
                     thumb = _to_rel_if_in_sandbox(cand)
 
-            p.tracks.append(Track(title=title, path=rel_or_abs, thumb=thumb))
+            p.tracks.append(
+                Track(
+                    title=title,
+                    path=rel_or_abs,
+                    thumb=thumb,
+                    video_id=video_id,
+                )
+            )
             existing.add(key)
             seen_batch.add(key)
             added_any = True
@@ -364,7 +494,6 @@ class PlaylistManager:
 
         first = True
         for path in files:
-            base = os.path.basename(path).lower()
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     raw = json.load(f)
@@ -465,7 +594,15 @@ def _pm_import_from_dict(self, raw: dict, merge: bool = False) -> None:
             if thumb and not isabs(thumb):
                 thumb_abs = normpath(join(root, thumb))
                 thumb = thumb_abs if exists(thumb_abs) else thumb
-            tr.append(Track(title=name, path=raw_path, duration=dur, thumb=thumb))
+            tr.append(
+                Track(
+                    title=name,
+                    path=raw_path,
+                    duration=dur,
+                    thumb=thumb,
+                    video_id=t.get("video_id"),
+                )
+            )
         incoming.append(
             Playlist(
                 id=p.get("id", str(uuid.uuid4())),

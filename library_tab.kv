@@ -9,6 +9,7 @@
 <PlaylistItem@BoxLayout>:
     pid: ""
     name: ""
+    selected: False
     size_hint_y: None
     height: dp(48)
     padding: dp(4), 0
@@ -17,6 +18,14 @@
         text: root.name
         halign: "left"
         size_hint_x: 1
+        shorten: True
+        shorten_from: "right"
+        text_size: self.width - dp(12), None
+        font_size: app.spx(14)
+        background_normal: ""
+        background_down: ""
+        background_color: app.theme_cls.primary_color if root.selected else (0.32, 0.32, 0.32, 1)
+        color: 1, 1, 1, 1
         on_release: app.root._playlist_on_select(root.pid)
     MDIconButton:
         icon: "dots-vertical"
@@ -78,18 +87,17 @@
     text: "Library"
     MDBoxLayout:
         size_hint: 1, 1
-        orientation: "horizontal"
+        orientation: "vertical" if Window.width < dp(700) else "horizontal"
         padding: dp(8)
         spacing: dp(8)
 
         # LEFT: Playlists list
         MDCard:
-            size_hint_y: 1
+            size_hint_x: 1 if Window.width < dp(700) else 0.4
+            size_hint_y: 0.36 if Window.width < dp(700) else 1
             radius: dp(16)
-            min_width: dp(160)
             padding: dp(8)
             style: "filled"
-            size_hint_x: 0.4
             MDBoxLayout:
                 orientation: "vertical"
                 size_hint_y: 1
@@ -142,11 +150,11 @@
 
         # RIGHT: Tracks of selected playlist
         MDCard:
-            size_hint_y: 1
+            size_hint_x: 1 if Window.width < dp(700) else 0.6
+            size_hint_y: 0.64 if Window.width < dp(700) else 1
             radius: dp(16)
             padding: dp(8)
             style: "filled"
-            size_hint_x: 0.65
             MDBoxLayout:
                 orientation: "vertical"
                 size_hint_y: 1

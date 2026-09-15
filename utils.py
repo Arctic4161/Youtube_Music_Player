@@ -6,6 +6,28 @@ import time
 from os import environ
 from pathlib import Path
 
+_TEMP_DOWNLOAD_SUFFIXES = (".part", ".webm", ".ytdl")
+
+
+def cleanup_download_artifacts(directory: str) -> tuple[str, ...]:
+    """Remove interrupted-download artifacts only from one managed directory."""
+
+    root = Path(directory)
+    if not root.is_dir():
+        return ()
+    removed: list[str] = []
+    for candidate in root.iterdir():
+        if not candidate.is_file():
+            continue
+        if not candidate.name.casefold().endswith(_TEMP_DOWNLOAD_SUFFIXES):
+            continue
+        try:
+            candidate.unlink()
+        except OSError:
+            continue
+        removed.append(str(candidate))
+    return tuple(removed)
+
 
 def get_platform():
     kivy_build = environ.get("KIVY_BUILD", "")

@@ -2,44 +2,34 @@
 title = Youtube Music Player
 package.name = youtubemusicplayer
 package.domain = com.youtubemusicplayer
-version = 1.6.0
-android.numeric_version = 10600
+version = 2.0.0
+android.numeric_version = 20000
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json
 
-source.include_patterns = ./service/main.py, playlist_manager.py, musicapp.kv, library_tab.kv, utils.py
+source.include_patterns = ./service/main.py, playlist_manager.py, musicapp.kv, library_tab.kv, utils.py, download_config.py, playback_logic.py, service_lifecycle.py, timer_lifecycle.py, media_identity.py, search_logic.py, ui_scaling.py
 
 # Your main script
 entrypoint = main.py
 
 # Kivy stack + your Python deps
 # Note: git URLs generally work with p4a/pip. If it errors, we can pin with PEP 508 "name @ git+..." syntax.
-requirements = python3,kivy,kivymd==1.2.0,pyjnius,cython,requests==2.32.5,httpx==0.17.1,httpcore==0.12.3,h11==0.12.0,rfc3986==1.5.0,sniffio==1.3.0,idna==3.4,git+https://github.com/Arctic4161/youtube-search-python.git,yt-dlp,oscpy,androidstorage4kivy,Pillow,mutagen
+requirements = python3==3.13.7,hostpython3==3.13.7,kivy==2.3.1,kivymd==1.2.0,pyjnius,requests==2.32.5,httpx==0.17.1,httpcore==0.12.3,h11==0.12.0,rfc3986==1.5.0,sniffio==1.3.0,idna==3.4,git+https://github.com/Arctic4161/youtube-search-python.git@73e7c725a1c3fd5204cd52afedbdbaf89bf2bc35,yt-dlp==2026.8.30.232658.dev0,oscpy==0.6.0,androidstorage4kivy==0.1.1,Pillow,mutagen==1.48.1
 
 # Android SDK targets (adjust if Gradle/p4a suggests otherwise)
-android.api = 33
+android.api = 36
 android.minapi = 28
+android.ndk = 28c
 android.ndk_api = 28
 android.archs = arm64-v8a,armeabi-v7a
+android.release_artifact = apk
 
-android.permissions = INTERNET, FOREGROUND_SERVICE, WAKE_LOCK, READ_MEDIA_AUDIO, READ_EXTERNAL_STORAGE, POST_NOTIFICATIONS, FOREGROUND_SERVICE_MEDIA_PLAYBACK
+android.permissions = INTERNET, FOREGROUND_SERVICE, WAKE_LOCK, POST_NOTIFICATIONS, FOREGROUND_SERVICE_MEDIA_PLAYBACK, FOREGROUND_SERVICE_DATA_SYNC
 
-#Will have to manually set this in biuldozer templates. It does not set the foregroundService type and android will kill it.
-services = musicservice:service/main.py:foreground
-android.foreground_service_types = mediaPlayback
-android.add_manifest_xml = """
-<manifest xmlns:tools="http://schemas.android.com/tools">
-  <application>
-    <service
-        android:name="com.youtubemusicplayer.youtubemusicplayer.ServiceMusicservice"
-        android:enabled="true"
-        android:exported="false"
-        android:stopWithTask="true"
-        tools:replace="android:foregroundServiceType,android:exported,android:stopWithTask"
-        android:foregroundServiceType="mediaPlayback" />
-  </application>
-</manifest>
-"""
+# python-for-android generates ServiceMusicservice and writes this foreground
+# service type into its manifest declaration (required for media playback on
+# current Android versions).
+services = musicservice:service/main.py:foreground:foregroundServiceType=mediaPlayback,downloadservice:service/download_service.py:foreground:foregroundServiceType=dataSync
 
 # Icon / Presplash (optional)
 icon.filename = music.png
@@ -51,11 +41,12 @@ orientation = portrait
 # Use the modern toolkit
 android.enable_androidx = True
 
-# 2) Add dependencies to both the app and the service
+# Keep the existing AndroidX dependency available to the packaged application.
 android.gradle_dependencies = androidx.core:core:1.9.0
-android.service.gradle_dependencies = androidx.core:core:1.9.0
+android.add_src = android_src
 
-p4a.branch = develop
+p4a.branch = v2026.05.09
+p4a.commit = 8aba7685beea080d0e34375e6c0e2067a2dcad0a
 
 [buildozer]
 log_level = 2
