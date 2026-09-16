@@ -151,7 +151,7 @@ else:
         return None
 
 
-from youtubesearchpython import VideosSearch
+from youtube_search_compat import create_video_search
 
 from playlist_manager import PlaylistManager
 
@@ -519,8 +519,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self._apply_playback_snapshot(snapshot)
 
     def reset_for_new_query(self):
-        """Clear time + status and hide the slider before a new search/load kicks off."""
+        """Remove the current result view before a replacement search starts."""
         self.stop()
+        self._reset_to_startup_gui()
         app = MDApp.get_running_app()
         app.root.ids.info.text = ""
         app.root.ids.song_position.text = ""
@@ -1550,14 +1551,21 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def new_search(self):
         self._start_music_service_user_initiated()
+        # A search replaces, rather than augments, the current result set. Clear
+        # this state before the worker starts so stale results cannot be shown
+        # while the new request is still in flight.
+        self.result1 = []
+        self.results_loaded = False
+        self.count = 0
+        self.selected_video_id = None
+        self.setytlink = None
+        self.settitle = ""
         self.reset_for_new_query()
         if GUILayout.slider is not None:
             GUILayout.slider.disabled = True
             GUILayout.slider.opacity = 0
         self.playlist_mode = False
         GUILayout.send("navigation_mode", "search")
-        self.count = 0
-        self.results_loaded = False
         self.retrieve_text()
 
     def retrieve_text(self):
@@ -1596,10 +1604,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         results: list[SearchResult] = []
         error = ""
         try:
-            search = VideosSearch(search_text)
+            search = create_video_search(search_text)
             results = parse_search_results(search.result())
         except Exception as exc:
             error = str(exc) or "Search request failed."
+            print(f"[search] {error}")
         Clock.schedule_once(
             lambda _dt, g=generation, r=results, e=error: (
                 self._receive_search_results(g, r, e)
