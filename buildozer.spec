@@ -14,7 +14,7 @@ entrypoint = main.py
 
 # Kivy stack + your Python deps
 # Note: git URLs generally work with p4a/pip. If it errors, we can pin with PEP 508 "name @ git+..." syntax.
-requirements = python3==3.13.7,hostpython3==3.13.7,kivy==2.3.1,kivymd==1.2.0,pyjnius,requests==2.32.5,httpx==0.17.1,httpcore==0.12.3,h11==0.12.0,rfc3986==1.5.0,sniffio==1.3.0,idna==3.4,git+https://github.com/Arctic4161/youtube-search-python.git@73e7c725a1c3fd5204cd52afedbdbaf89bf2bc35,yt-dlp==2026.8.30.232658.dev0,oscpy==0.6.0,androidstorage4kivy==0.1.1,Pillow,mutagen==1.48.1
+requirements = python3==3.13.7,hostpython3==3.13.7,kivy==2.3.1,kivymd==1.2.0,pyjnius,requests==2.32.5,httpx==0.28.1,httpcore==1.0.9,h11==0.16.0,anyio==4.10.0,certifi==2025.8.3,charset-normalizer==2.1.1,sniffio==1.3.1,idna==3.10,git+https://github.com/Arctic4161/youtube-search-python.git@73e7c725a1c3fd5204cd52afedbdbaf89bf2bc35,yt-dlp==2026.8.30.232658.dev0,oscpy==0.6.0,androidstorage4kivy==0.1.1,Pillow,mutagen==1.48.1
 
 # Android SDK targets (adjust if Gradle/p4a suggests otherwise)
 android.api = 36

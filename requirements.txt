@@ -4,12 +4,18 @@ requests==2.32.5
 oscpy==0.6.0
 androidstorage4kivy==0.1.1
 mutagen==1.48.1
-httpx==0.17.1
-httpcore==0.12.3
-h11==0.12.0
-rfc3986==1.5.0
-sniffio==1.3.0
-idna==3.4
+# httpx 0.17 imports the removed stdlib ``cgi`` module and cannot start under
+# the Python 3.13 runtime used by the Android package.
+httpx==0.28.1
+httpcore==1.0.9
+h11==0.16.0
+anyio==4.10.0
+certifi==2025.8.3
+# 2.1.1 is pure Python. Newer releases include host-built mypyc modules that
+# python-for-android can mistakenly copy into an Android bundle.
+charset-normalizer==2.1.1
+sniffio==1.3.1
+idna==3.10
 yt-dlp==2026.8.30.232658.dev0
 kivy-deps.gstreamer==0.3.4; platform_system == "Windows"
 youtube-search-python @ git+https://github.com/Arctic4161/youtube-search-python.git@73e7c725a1c3fd5204cd52afedbdbaf89bf2bc35

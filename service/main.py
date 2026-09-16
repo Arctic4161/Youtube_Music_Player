@@ -33,7 +33,7 @@ if utils.get_platform() == "android":
     os.environ["KIVY_AUDIO"] = "android"
     os.environ.setdefault("KIVY_WINDOW", "mock")
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-    from jnius import PythonJavaClass, autoclass, cast, java_method, jarray
+    from jnius import PythonJavaClass, autoclass, cast, java_method
 else:
     os.environ["KIVY_AUDIO"] = "gstplayer"
 
@@ -260,8 +260,10 @@ def ensure_foreground(ctx, svc, session=None):
     NotificationChannel = autoclass("android.app.NotificationChannel")
     NotificationBuilder = autoclass("android.app.Notification$Builder")
     NotificationActionBuilder = autoclass("android.app.Notification$Action$Builder")
+    Icon = autoclass("android.graphics.drawable.Icon")
     PendingIntent = autoclass("android.app.PendingIntent")
     PythonActivity = autoclass("org.kivy.android.PythonActivity")
+    JavaString = autoclass("java.lang.String")
     ControlReceiver = autoclass(
         "com.youtubemusicplayer.bridge.MusicControlReceiver"
     )
@@ -310,6 +312,10 @@ def ensure_foreground(ctx, svc, session=None):
             ControlReceiver.ACTION_NEXT,
         ),
     ):
+        # Pyjnius 1.7 resolves this overload correctly only with the precise
+        # Icon/CharSequence signature; it does not coerce the older int icon
+        # constructor used by Python-for-Android's former Pyjnius release.
+        action_icon = Icon.createWithResource(ctx, int(icon))
         control_intent = Intent(action)
         control_intent.setPackage(ctx.getPackageName())
         control_pending_intent = PendingIntent.getBroadcast(
@@ -320,16 +326,21 @@ def ensure_foreground(ctx, svc, session=None):
         )
         b.addAction(
             NotificationActionBuilder(
-                icon,
-                title,
+                action_icon,
+                JavaString(title),
                 control_pending_intent,
             ).build()
         )
     if session is not None:
-        MediaStyle = autoclass("android.app.Notification$MediaStyle")
-        style = MediaStyle().setMediaSession(session.getSessionToken())
-        style.setShowActionsInCompactView(jarray("i")([0, 1, 2]))
-        b.setStyle(style)
+        try:
+            NotificationStyle = autoclass(
+                "com.youtubemusicplayer.bridge.MusicNotificationStyle"
+            )
+            NotificationStyle.applyMediaStyle(b, session)
+        except Exception as exc:
+            # The actions above remain usable if a future platform rejects the
+            # optional visual enhancement.
+            print("[notification] MediaStyle unavailable:", exc)
     _NOTIFICATION_MANAGER = nm
     _NOTIFICATION_BUILDER = b
     _SERVICE_CONTEXT = ctx
