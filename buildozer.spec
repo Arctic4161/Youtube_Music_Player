@@ -2,12 +2,12 @@
 title = Youtube Music Player
 package.name = youtubemusicplayer
 package.domain = com.youtubemusicplayer
-version = 2.0.0
-android.numeric_version = 20000
+version = 2.0.1
+android.numeric_version = 20001
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json
 
-source.include_patterns = ./service/main.py, playlist_manager.py, musicapp.kv, library_tab.kv, utils.py, download_config.py, playback_logic.py, service_lifecycle.py, timer_lifecycle.py, media_identity.py, search_logic.py, youtube_search_compat.py, ui_scaling.py
+source.include_patterns = ./service/main.py, ./service/download_service.py, playlist_manager.py, musicapp.kv, library_tab.kv, utils.py, download_config.py, playback_logic.py, radio_logic.py, radio_catalog.py, radio_player.py, radio_proxy.py, service_lifecycle.py, timer_lifecycle.py, media_identity.py, search_logic.py, youtube_search_compat.py, ui_scaling.py
 
 # Your main script
 entrypoint = main.py
@@ -29,7 +29,7 @@ android.permissions = INTERNET, FOREGROUND_SERVICE, WAKE_LOCK, POST_NOTIFICATION
 # python-for-android generates ServiceMusicservice and writes this foreground
 # service type into its manifest declaration (required for media playback on
 # current Android versions).
-services = musicservice:service/main.py:foreground:foregroundServiceType=mediaPlayback,downloadservice:service/download_service.py:foreground:foregroundServiceType=dataSync
+services = musicservice:service/main.py:foreground:foregroundServiceType=mediaPlayback,downloadservice:service/download_service.py:foreground:sticky:foregroundServiceType=dataSync
 
 # Icon / Presplash (optional)
 icon.filename = music.png
@@ -42,7 +42,7 @@ orientation = portrait
 android.enable_androidx = True
 
 # Keep the existing AndroidX dependency available to the packaged application.
-android.gradle_dependencies = androidx.core:core:1.9.0
+android.gradle_dependencies = androidx.core:core:1.9.0,androidx.media3:media3-exoplayer:1.5.1,androidx.media3:media3-datasource-okhttp:1.5.1
 android.add_src = android_src
 
 p4a.branch = v2026.05.09

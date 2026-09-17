@@ -3,6 +3,15 @@
     # default body size; override per-usage where needed
     font_size: app.spx(14)
 
+<TimelineLabel@Label>:
+    # Reserve side gutters and keep HH:MM:SS on one line at narrow widths.
+    font_name: "Roboto"
+    font_size: min(app.spx(14), self.width / 5.0)
+    size_hint: 0.17, None
+    height: max(dp(24), self.texture_size[1])
+    text_size: self.width, None
+    color: 1, 1, 1, 1
+
 <GUILayout>:
     store: app._store
     MDBottomNavigation:
@@ -32,21 +41,39 @@
                     icon_color: app.theme_cls.primary_color
                     on_press: root.new_search()
 
+                MDIconButton:
+                    id: radio_btt
+                    icon: "radio"
+                    tooltip_text: "Start Radio"
+                    pos_hint: {'center_x': 0.81, 'center_y': 0.93}
+                    theme_icon_color: "Custom"
+                    icon_color: app.theme_cls.primary_color
+                    on_press: root.toggle_radio()
+                    opacity: 0
+                    disabled: True
+
                 MDTextField:
                     id: input_box
                     hint_text: "Enter Search"
                     multiline: False
-                    size_hint_x: 0.7
-                    pos_hint: {'center_x': 0.45, 'center_y': 0.93}
+                    size_hint_x: 0.62
+                    pos_hint: {'center_x': 0.41, 'center_y': 0.93}
                     on_text_validate: root.new_search()
 
                 MDLabel:
                     id: song_title
                     text: ""
                     font_size: app.spx(12)
-                    size_hint_y: 0.03
-                    padding: 100, 100
+                    size_hint_x: 0.86
+                    size_hint_y: None
+                    height: max(dp(26), self.texture_size[1])
+                    padding: dp(8), 0
                     pos_hint: {'center_x': 0.50, 'center_y': 0.80}
+                    text_size: self.width - dp(16), None
+                    halign: "center"
+                    valign: "middle"
+                    shorten: True
+                    shorten_from: "right"
                     theme_text_color: "Custom"
                     text_color: 1, 1, 1, 1
 
@@ -54,26 +81,29 @@
                     id: info
                     text: ""
                     font_size: app.spx(12)
-                    size_hint_y: 0.03
-                    pos_hint: {'center_x': 0.60, 'center_y': 0.30}
+                    size_hint_x: 0.86
+                    size_hint_y: None
+                    height: max(dp(24), self.texture_size[1])
+                    padding: dp(8), 0
+                    pos_hint: {'center_x': 0.50, 'center_y': 0.23}
+                    text_size: self.width - dp(16), None
+                    halign: "center"
+                    valign: "middle"
                     theme_text_color: "Custom"
                     text_color: 1, 1, 1, 1
                     adaptive_height: True
 
-                MDLabel:
+                TimelineLabel:
                     id: song_position
                     text: ""
-                    size_hint_y: 0.03
-                    pos_hint: {'center_x': 0.60, 'center_y': 0.30}
-                    theme_text_color: "Custom"
-                    text_color: 1, 1, 1, 1
+                    pos_hint: {'right': 0.19, 'center_y': 0.30}
+                    halign: "right"
 
-                MDLabel:
+                TimelineLabel:
                     id: song_max
                     text: ""
-                    pos_hint: {'center_x': 1.30, 'center_y': 0.30}
-                    theme_text_color: "Custom"
-                    text_color: 1, 1, 1, 1
+                    pos_hint: {'x': 0.81, 'center_y': 0.30}
+                    halign: "left"
 
                 MDIconButton:
                     id: shuffle_btt

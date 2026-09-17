@@ -4,7 +4,7 @@
 
 import os
 import sys
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 from PyInstaller.building.build_main import Analysis, PYZ, EXE, COLLECT
 
 # Optional (Windows/Linux): ship Kivy runtime binaries
@@ -39,8 +39,14 @@ _datas = [
 _datas += collect_data_files('kivy')
 _datas += collect_data_files('kivymd')
 
-# ---- Hidden imports ----
+# ---- Hidden imports / binary extensions ----
 _hidden = [] + collect_submodules('kivymd')
+_binaries = []
+try:
+    _hidden += ['ffpyplayer.player']
+    _binaries += collect_dynamic_libs('ffpyplayer')
+except Exception:
+    pass
 
 # You can add modules discovered only at runtime here, e.g.:
 # _hidden += ['PIL._imaging', 'idna.idnadata']
@@ -52,6 +58,10 @@ _extra_sources = [
     ('download_config.py', '.'),
     ('media_identity.py', '.'),
     ('playback_logic.py', '.'),
+    ('radio_logic.py', '.'),
+    ('radio_catalog.py', '.'),
+    ('radio_player.py', '.'),
+    ('radio_proxy.py', '.'),
     ('playlist_manager.py', '.'),
     ('search_logic.py', '.'),
     ('service_lifecycle.py', '.'),
@@ -70,7 +80,7 @@ _icon_path = 'music.ico' if os.path.exists('music.ico') else None
 a = Analysis(
     ['main.py'],
     pathex=[_project_root],
-    binaries=[],
+    binaries=_binaries,
     datas=_datas,
     hiddenimports=_hidden,
     hookspath=_hookspath,

@@ -19,5 +19,8 @@ idna==3.10
 urllib3==2.8.0
 Pillow==11.3.0
 yt-dlp==2026.8.30.232658.dev0
+# Radio streams use the raw player directly so pause/resume does not inherit
+# Kivy SoundFFPy's restart-on-play behavior. Android uses bundled Media3.
+ffpyplayer==4.5.3; platform_system == "Windows"
 kivy-deps.gstreamer==0.3.4; platform_system == "Windows"
 youtube-search-python @ git+https://github.com/Arctic4161/youtube-search-python.git@73e7c725a1c3fd5204cd52afedbdbaf89bf2bc35

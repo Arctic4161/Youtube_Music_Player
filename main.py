@@ -28,15 +28,9 @@ os.environ["KIVY_NO_CONSOLELOG"] = "1"
 if utils.get_platform() != "android":
     os.environ["KIVY_AUDIO"] = "gstplayer"
 else:
-    from android.permissions import Permission, request_permissions
+    from android.permissions import Permission, check_permission, request_permissions
     from android.runnable import run_on_ui_thread
     from jnius import PythonJavaClass, autoclass, java_method
-
-    request_permissions(
-        [
-            Permission.POST_NOTIFICATIONS,
-        ]
-    )
 
 
 def _android_music_service_handles():
@@ -387,6 +381,19 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def _show_snapshot_track(self, snapshot: PlaybackSnapshot):
         if not snapshot.track_name:
             return
+        if snapshot.playback_mode == "radio":
+            self.stream = None
+            cover_path = snapshot.cover_path or default_cover_path()
+            self.set_local = cover_path
+            self.settitle = snapshot.track_name
+            with contextlib.suppress(Exception):
+                self.ids.imageView.source = str(cover_path)
+                self.ids.song_title.text = (
+                    f"{self.settitle[:51]}..."
+                    if len(self.settitle) > 51
+                    else self.settitle
+                )
+            return
         filename = os.path.basename(snapshot.track_name)
         title, _extension = os.path.splitext(filename)
         self.stream = os.path.join(self.set_local_download, filename)
@@ -429,11 +436,17 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def _apply_playback_snapshot(self, snapshot: PlaybackSnapshot):
         status = snapshot.status
         GUILayout.service_playback_status = status.value
+        self._apply_radio_state_values(
+            active=snapshot.playback_mode == "radio",
+            available=snapshot.radio_available,
+        )
         self.repeat_selected = snapshot.repeat_enabled
         self.shuffle_selected = snapshot.shuffle_enabled
         # Any loaded service queue owns Next/Previous. A one-song queue has no
         # destination, but it must never fall back to browsing search results.
-        self.playlist_mode = snapshot.queue_size >= 1
+        self.playlist_mode = (
+            snapshot.playback_mode == "radio" or snapshot.queue_size >= 1
+        )
 
         with contextlib.suppress(Exception):
             self.ids.repeat_btt.text_color = (
@@ -463,7 +476,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if snapshot.track_name:
             self._show_snapshot_timeline(snapshot)
 
-        has_queue_navigation = snapshot.queue_size >= 2
+        has_queue_navigation = (
+            snapshot.playback_mode == "radio" or snapshot.queue_size >= 2
+        )
+        is_radio = snapshot.playback_mode == "radio"
         is_loading = status is PlaybackStatus.LOADING
         self.paused = status is PlaybackStatus.PAUSED
         GUILayout.playing_song = status is PlaybackStatus.PLAYING
@@ -479,8 +495,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.ids.previous_btt.opacity = 1 if has_queue_navigation else 0
             self.ids.repeat_btt.disabled = is_loading
             self.ids.repeat_btt.opacity = 1
-            self.ids.shuffle_btt.disabled = is_loading or not has_queue_navigation
-            self.ids.shuffle_btt.opacity = 1 if has_queue_navigation else 0
+            self.ids.shuffle_btt.disabled = (
+                is_loading or is_radio or not has_queue_navigation
+            )
+            self.ids.shuffle_btt.opacity = (
+                1 if has_queue_navigation and not is_radio else 0
+            )
             if is_loading and not self.ids.info.text:
                 self.ids.info.text = "Preparing audio..."
             elif not is_loading:
@@ -517,6 +537,35 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if utils.get_platform() == "android":
             GUILayout.service_started = True
         self._apply_playback_snapshot(snapshot)
+
+    def _apply_radio_state_values(self, *, active: bool, available: bool) -> None:
+        self.radio_active = bool(active)
+        self.radio_available = bool(available)
+        with contextlib.suppress(Exception):
+            radio_btt = self.ids.radio_btt
+            radio_btt.icon = "stop-circle-outline" if active else "radio"
+            radio_btt.tooltip_text = "Stop Radio" if active else "Start Radio"
+            radio_btt.disabled = not (active or available)
+            radio_btt.opacity = 1 if (active or available) else 0
+
+    @mainthread
+    def apply_radio_state(self, *values):
+        try:
+            raw = "".join(
+                bytes(value).decode("utf-8", "ignore")
+                if isinstance(value, (bytes, bytearray))
+                else str(value)
+                for value in values
+            )
+            state = json.loads(raw)
+            if not isinstance(state, dict):
+                return
+        except (TypeError, ValueError):
+            return
+        self._apply_radio_state_values(
+            active=bool(state.get("active")),
+            available=bool(state.get("available")),
+        )
 
     def reset_for_new_query(self):
         """Remove the current result view before a replacement search starts."""
@@ -561,25 +610,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if status is not None:
             GUILayout.service_playback_status = status.value
 
-    def set_gui_from_check(self, dt):
-        if GUILayout.service_playback_status == PlaybackStatus.PLAYING.value:
-            self.paused = False
-            GUILayout.playing_song = True
-            self.set_gui_conditions(0, True, False, 1)
-        elif GUILayout.service_playback_status == PlaybackStatus.IDLE.value:
-            self.paused = False
-            GUILayout.playing_song = False
-            self.set_gui_conditions_from_none()
-        elif GUILayout.service_playback_status == PlaybackStatus.PAUSED.value:
-            self.paused = True
-            GUILayout.playing_song = False
-            self.set_gui_conditions(1, False, True, 0)
-
     @mainthread
     def _reset_to_startup_gui(self):
         self.gui_reset = True
         self.paused = False
         GUILayout.playing_song = False
+        self._apply_radio_state_values(active=False, available=False)
         try:
             app = MDApp.get_running_app()
             root = app.root
@@ -671,6 +707,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.count = self.count - 1
             self.retrieve_text()
 
+    def toggle_radio(self):
+        if getattr(self, "radio_active", False):
+            GUILayout.send("stop_radio", "")
+        elif getattr(self, "radio_available", False):
+            GUILayout.send("start_radio", "")
+
     def set_next_previous_bttns(self):
         self.paused = False
         GUILayout.playing_song = True
@@ -713,6 +755,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             GUILayout.client.send_message("/update_load_fs", message)
         elif message_type == "previous":
             GUILayout.client.send_message("/previous", message)
+        elif message_type == "start_radio":
+            GUILayout.client.send_message("/start_radio", message)
+        elif message_type == "stop_radio":
+            GUILayout.client.send_message("/stop_radio", message)
         elif message_type == "iamawake":
             GUILayout.client.send_message("/iamawake", message)
         elif message_type == "loop":
@@ -739,8 +785,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             )
             if client is not None:
                 client.send_message("/cancel_download", [message])
-        elif message_type == "iampaused":
-            GUILayout.client.send_message("/iampaused", message)
 
     def _active_playlist_song_names(self):
         names = []
@@ -1239,6 +1283,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.selected_video_id = None
         self._search_generation = 0
         self.playlist_mode = False
+        self.radio_active = False
+        self.radio_available = False
         self.repeat_selected = False
         self.shuffle_selected = False
         self._service_reconnect_request_id = None
@@ -1261,6 +1307,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         server.bind("/download_result", self.download_result)
         server.bind("/are_we", self.check_are_we_playing)
         server.bind("/playback_snapshot", self.apply_playback_snapshot)
+        server.bind("/radio_state", self.apply_radio_state)
         server.bind("/song_not_found", self.on_song_not_found)
         server.bind("/controls", self._controls)
         GUILayout.client = OSCClient("localhost", 3000, encoding="utf8")
@@ -1838,6 +1885,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         return False
 
     def checkfile(self):
+        if getattr(self, "radio_active", False):
+            # Radio has no local file. Let the service resume its stream and
+            # publish the resulting playback state back to the GUI.
+            GUILayout.send("play", "play")
+            return
         MDApp.get_running_app().root.ids.play_btt.disabled = True
         MDApp.get_running_app().root.ids.info.text = ""
         MDApp.get_running_app().root.ids.song_position.text = ""
@@ -1992,15 +2044,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         res1 = time.strftime("%H:%M:%S", adding_value)
         if str(res1[:2]) == "00":
             res1 = res1[3:]
-            MDApp.get_running_app().root.ids.song_position.pos_hint = {
-                "center_x": 0.60,
-                "center_y": 0.3,
-            }
-        else:
-            MDApp.get_running_app().root.ids.song_position.pos_hint = {
-                "center_x": 0.56,
-                "center_y": 0.3,
-            }
         MDApp.get_running_app().root.ids.song_position.text = str(res1)
         MDApp.get_running_app().root.ids.song_max.text = str(res)
 
@@ -2213,6 +2256,11 @@ class Musicapp(MDApp):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        # Do not let the launcher's working directory select a different
+        # musicapp.kv when development and publisher trees are both present.
+        self.kv_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "musicapp.kv"
+        )
         store_path = os.path.join(get_app_writable_dir("Downloaded"), "app_state.json")
         self._store = JsonStore(store_path)
         self._update_ui_scale()
@@ -2236,14 +2284,69 @@ class Musicapp(MDApp):
         return path if os.path.exists(path) else default_cover_path()
 
     def on_stop(self):
-        """Called by Kivy when the app is closing."""
+        """Clean up an intentional desktop exit without stopping Android playback."""
+
+        if utils.get_platform() == "android":
+            # Android calls on_stop when its activity is reclaimed or recreated.
+            # The foreground playback service belongs to a different process and
+            # must continue in that case.
+            self._cancel_resume_handshake()
+            self._cancel_deferred_notification_permission()
+            return
         self._cleanup_on_exit()
 
     def on_start(self):
         """Connect after build(), when the GUI OSC listener is available."""
 
         _apply_android_system_bar_insets()
-        Clock.schedule_once(self._resume_handshake, 0)
+        self._schedule_resume_handshake()
+        self._defer_android_notification_permission()
+
+    def _cancel_resume_handshake(self):
+        cancel_event(getattr(self, "_resume_handshake_event", None))
+        self._resume_handshake_event = None
+
+    def _schedule_resume_handshake(self, *_args):
+        """Coalesce Android start/resume callbacks into one surface-safe restore."""
+
+        self._resume_handshake_event = replace_event(
+            getattr(self, "_resume_handshake_event", None),
+            lambda: Clock.schedule_once(self._resume_handshake, 0.15),
+        )
+
+    def _cancel_deferred_notification_permission(self):
+        if not getattr(self, "_notification_permission_frame_pending", False):
+            return
+        with contextlib.suppress(Exception):
+            Window.unbind(on_flip=self._request_android_notification_permission)
+        self._notification_permission_frame_pending = False
+
+    def _defer_android_notification_permission(self):
+        """Ask only after the initial Kivy frame, never while its surface starts."""
+
+        if (
+            utils.get_platform() != "android"
+            or getattr(self, "_notification_permission_requested", False)
+            or getattr(self, "_notification_permission_frame_pending", False)
+        ):
+            return
+        self._notification_permission_frame_pending = True
+        Window.bind(on_flip=self._request_android_notification_permission)
+
+    def _request_android_notification_permission(self, *_args):
+        """Request Android notification permission once, only when it is missing."""
+
+        self._cancel_deferred_notification_permission()
+        if (
+            utils.get_platform() != "android"
+            or getattr(self, "_notification_permission_requested", False)
+        ):
+            return
+        self._notification_permission_requested = True
+        with contextlib.suppress(Exception):
+            if check_permission(Permission.POST_NOTIFICATIONS):
+                return
+            request_permissions([Permission.POST_NOTIFICATIONS])
 
     def _cleanup_on_exit(self):
         """Centralized shutdown path; safe to call multiple times."""
@@ -2304,13 +2407,12 @@ class Musicapp(MDApp):
         raise NotImplementedError("service stop not implemented on this platform")
 
     def on_pause(self):
+        self._cancel_resume_handshake()
         root = getattr(self, "root", None)
         if root and hasattr(root, "_cancel_service_reconnect"):
             root._cancel_service_reconnect()
         cancel_event(GUILayout.get_update_slider)
         GUILayout.get_update_slider = None
-        with contextlib.suppress(Exception):
-            GUILayout.send("iampaused", ":(")
         return True
 
     def on_resume(self):
@@ -2319,21 +2421,33 @@ class Musicapp(MDApp):
           - Hop to main thread and run a handshake that asks the service
             for state and updates the UI safely.
         """
-        Clock.schedule_once(self._resume_handshake, 0)
+        self._schedule_resume_handshake()
         return None
 
     @mainthread
     def _resume_handshake(self, *args):
         """Re-sync this GUI process with the persistent playback service."""
 
+        self._resume_handshake_event = None
         self.root.begin_service_reconnect()
-        Clock.schedule_once(lambda dt: Window.canvas.ask_update(), 0)
+        # The first call can land before SDL recreates the Android surface.
+        # Repeat after it has had a frame to become drawable.
+        for delay in (0, 0.25, 1.0):
+            Clock.schedule_once(self._request_canvas_redraw, delay)
+
+    @staticmethod
+    def _request_canvas_redraw(_dt):
+        with contextlib.suppress(Exception):
+            Window.canvas.ask_update()
 
 
 if __name__ == "__main__":
-    cleanup_download_artifacts(get_app_writable_dir("Downloaded/Played"))
+    # Android's download service can outlive this GUI and still own .part files.
+    if utils.get_platform() != "android":
+        cleanup_download_artifacts(get_app_writable_dir("Downloaded/Played"))
     app = Musicapp()
     try:
         app.run()
     finally:
-        app.stop_service()
+        if utils.get_platform() != "android":
+            app.stop_service()

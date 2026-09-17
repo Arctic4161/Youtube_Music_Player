@@ -112,6 +112,8 @@ class PlaybackSnapshot:
     repeat_enabled: bool = False
     shuffle_enabled: bool = False
     queue_size: int = 0
+    playback_mode: str = "local"
+    radio_available: bool = False
 
     def to_json(self) -> str:
         duration = _non_negative_float(self.duration)
@@ -120,7 +122,7 @@ class PlaybackSnapshot:
             position = min(position, duration)
         return json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "request_id": self.request_id,
                 "status": self.status.value,
                 "track_name": self.track_name,
@@ -130,6 +132,8 @@ class PlaybackSnapshot:
                 "repeat_enabled": self.repeat_enabled,
                 "shuffle_enabled": self.shuffle_enabled,
                 "queue_size": max(0, int(self.queue_size)),
+                "playback_mode": self.playback_mode,
+                "radio_available": self.radio_available,
             },
             separators=(",", ":"),
         )
@@ -165,6 +169,9 @@ class PlaybackSnapshot:
             queue_size = max(0, int(data.get("queue_size") or 0))
         except (TypeError, ValueError):
             queue_size = 0
+        playback_mode = str(data.get("playback_mode") or "local").strip().lower()
+        if playback_mode not in {"local", "radio"}:
+            playback_mode = "local"
         return cls(
             request_id=request_id,
             status=status,
@@ -175,6 +182,8 @@ class PlaybackSnapshot:
             repeat_enabled=_snapshot_bool(data.get("repeat_enabled")),
             shuffle_enabled=_snapshot_bool(data.get("shuffle_enabled")),
             queue_size=queue_size,
+            playback_mode=playback_mode,
+            radio_available=_snapshot_bool(data.get("radio_available")),
         )
 
 
