@@ -131,7 +131,7 @@
                     id: pause_btt
                     icon: "pause"
                     pos_hint: {'center_x': 0.5, 'center_y': 0.15}
-                    on_press: root.pause()
+                    on_release: root.pause()
                     theme_icon_color: "Custom"
                     icon_color: 1, 0, 0, 1
                     opacity: 0
@@ -142,7 +142,7 @@
                     id: play_btt
                     icon: "play"
                     pos_hint: {'center_x': 0.5, 'center_y': 0.15}
-                    on_press: root.checkfile()
+                    on_release: root.checkfile()
                     theme_icon_color: "Custom"
                     icon_color: app.theme_cls.primary_color
                     opacity: 0

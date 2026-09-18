@@ -36,6 +36,7 @@ class RadioProxy:
         self._closed = threading.Event()
         self._lock = threading.Lock()
         self._sockets: set[socket.socket] = set()
+        self._diagnostic = "no-tunnel-error"
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -56,6 +57,7 @@ class RadioProxy:
                         or target.username or target.password
                         or not owner._allows(host)
                     ):
+                        owner._record_failure("connect-policy", ValueError("blocked destination"))
                         self.send_error(403)
                         return
                     owner._track(self.connection)
@@ -72,9 +74,10 @@ class RadioProxy:
                     finally:
                         owner._forget(upstream)
                         upstream.close()
-                except (OSError, EOFError, ValueError):
+                except (OSError, EOFError, ValueError) as exc:
                     # Closing the connection propagates failure to the player;
                     # there is intentionally no direct-network fallback.
+                    owner._record_failure("socks-connect-or-relay", exc)
                     return
                 finally:
                     owner._forget(self.connection)
@@ -104,6 +107,21 @@ class RadioProxy:
             if self._closed.is_set():
                 raise OSError("Radio proxy is closed")
             self._sockets.add(connection)
+
+    @property
+    def diagnostic(self) -> str:
+        """Return a safe, URL-free description of the most recent tunnel fault."""
+
+        with self._lock:
+            return self._diagnostic
+
+    def _record_failure(self, stage: str, exc: BaseException) -> None:
+        """Keep only safe error classification; never retain stream URL or headers."""
+
+        errno = getattr(exc, "errno", None)
+        detail = f"errno={errno}" if errno is not None else type(exc).__name__
+        with self._lock:
+            self._diagnostic = f"{stage}:{detail}"
 
     def _forget(self, connection: socket.socket) -> None:
         with self._lock:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -10,6 +11,7 @@ from utils import safe_filename
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
 _IDENTITY_SUFFIX_RE = re.compile(r"\s+\[([A-Za-z0-9_-]{6,64})\]$")
+_AUDIO_EXTENSIONS = (".m4a", ".mp3", ".aac", ".flac", ".ogg", ".wav")
 
 
 def youtube_video_id(url: str, explicit_id: object = None) -> str | None:
@@ -58,6 +60,43 @@ def media_stem(title: str, media_id: str) -> str:
 
 def audio_filename(title: str, media_id: str) -> str:
     return f"{media_stem(title, media_id)}.m4a"
+
+
+def find_existing_audio(directory: str, title: str, media_id: str) -> str | None:
+    """Find a downloaded audio file before the caller starts a new download."""
+
+    root = str(directory or "")
+    clean_id = str(media_id or "").strip()
+    if not root or not clean_id or not os.path.isdir(root):
+        return None
+
+    expected = os.path.join(root, audio_filename(title, clean_id))
+    if os.path.isfile(expected):
+        return expected
+
+    suffix = f"[{stable_media_id('', clean_id)}]".casefold()
+    matches: list[str] = []
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                _stem, extension = os.path.splitext(entry.name)
+                if extension.casefold() not in _AUDIO_EXTENSIONS:
+                    continue
+                if _stem.casefold().endswith(suffix):
+                    matches.append(entry.path)
+    except OSError:
+        pass
+    if matches:
+        return sorted(matches, key=lambda path: os.path.basename(path).casefold())[0]
+
+    legacy_stem = safe_filename(title)
+    for extension in _AUDIO_EXTENSIONS:
+        legacy_path = os.path.join(root, f"{legacy_stem}{extension}")
+        if os.path.isfile(legacy_path):
+            return legacy_path
+    return None
 
 
 def display_title_from_stem(stem: str) -> str:

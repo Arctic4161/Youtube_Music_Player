@@ -13,6 +13,9 @@ from download_config import configured_proxy
 from radio_proxy import RadioProxy
 
 
+_ANDROID_MEDIA3_BRIDGE_TYPE = None
+
+
 class RadioPlayerError(RuntimeError):
     """Raised when the selected Radio backend cannot load or play a stream."""
 
@@ -22,6 +25,28 @@ def _header_value(headers: Mapping[str, str], name: str) -> str:
         if key.casefold() == name.casefold():
             return str(value)
     return ""
+
+
+def preload_android_media3_bridge() -> None:
+    """Resolve the app bridge before Radio work moves onto a Python thread.
+
+    Android's JNI ``FindClass`` only sees app classes when called from the
+    service's Java-owned startup thread. Stream resolution happens later on a
+    Python worker, where the same lookup is limited to framework classes.
+    """
+
+    global _ANDROID_MEDIA3_BRIDGE_TYPE
+    if _ANDROID_MEDIA3_BRIDGE_TYPE is None:
+        from jnius import autoclass
+
+        _ANDROID_MEDIA3_BRIDGE_TYPE = autoclass(
+            "com.youtubemusicplayer.bridge.RadioMedia3Player"
+        )
+
+
+def _android_media3_bridge_type():
+    preload_android_media3_bridge()
+    return _ANDROID_MEDIA3_BRIDGE_TYPE
 
 
 class FFPyRadioPlayer:
@@ -231,11 +256,7 @@ class AndroidMedia3RadioPlayer:
     def __init__(self, url: str, headers: Mapping[str, str], context, *, proxy_url: str = "") -> None:
         self._proxy = None
         try:
-            from jnius import autoclass
-
-            bridge_type = autoclass(
-                "com.youtubemusicplayer.bridge.RadioMedia3Player"
-            )
+            bridge_type = _android_media3_bridge_type()
             self._bridge = bridge_type(context)
             self._proxy = RadioProxy(url, proxy_url or configured_proxy())
             self._bridge.load(
@@ -260,7 +281,12 @@ class AndroidMedia3RadioPlayer:
         try:
             return "play" if self._bridge.isPlaybackActive() else "stop"
         except Exception as exc:
-            raise RadioPlayerError("Android Radio playback failed.") from exc
+            diagnostic = getattr(
+                getattr(self, "_proxy", None), "diagnostic", "no-tunnel-diagnostic"
+            )
+            raise RadioPlayerError(
+                f"Android Radio playback failed: {exc}; tunnel={diagnostic}"
+            ) from exc
 
     def _refresh_length(self) -> None:
         with contextlib.suppress(Exception):

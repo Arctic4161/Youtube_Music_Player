@@ -6,6 +6,7 @@ import android.os.Looper;
 
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.C;
+import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.datasource.okhttp.OkHttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
@@ -151,8 +152,12 @@ public final class RadioMedia3Player {
         boolean[] result = {false};
         onMainSync(() -> {
             if (player != null) {
-                if (player.getPlayerError() != null) {
-                    throw new IllegalStateException("Radio playback failed.");
+                PlaybackException error = player.getPlayerError();
+                if (error != null) {
+                    // Error-code names are stable diagnostic information and do
+                    // not expose the signed, transient YouTube stream URL.
+                    throw new IllegalStateException(
+                            "Media3 " + PlaybackException.getErrorCodeName(error.errorCode));
                 }
                 int state = player.getPlaybackState();
                 result[0] = player.getPlayWhenReady()

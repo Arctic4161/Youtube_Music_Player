@@ -39,7 +39,11 @@ from radio_catalog import (
     search_fallback_tracks,
 )
 from radio_logic import RadioSeed, RadioSession, RadioTrack
-from radio_player import RadioPlayerError, create_radio_player
+from radio_player import (
+    RadioPlayerError,
+    create_radio_player,
+    preload_android_media3_bridge,
+)
 from utils import get_app_writable_dir
 
 if utils.get_platform() == "android":
@@ -47,11 +51,15 @@ if utils.get_platform() == "android":
     os.environ.setdefault("KIVY_WINDOW", "mock")
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     from jnius import PythonJavaClass, autoclass, cast, java_method
+    try:
+        preload_android_media3_bridge()
+    except Exception as exc:
+        # A later player creation reports a user-facing Radio error. Do not
+        # prevent the persistent local-playback service from starting.
+        print(f"[service] Media3 Radio bridge preload failed: {exc}")
 else:
     os.environ["KIVY_AUDIO"] = "gstplayer"
 
-from kivy.core.audio import SoundLoader
-from mutagen.mp4 import MP4, MP4Cover
 from oscpy.client import OSCClient
 from oscpy.server import OSCThreadServer
 
@@ -69,9 +77,36 @@ _CONTROL_RECEIVER = None
 _FOREGROUND_ACTIVE = False
 _IDLE_DEMOTION_TIMER = None
 _FOREGROUND_IDLE_DELAY_S = 5.0
-_FOREGROUND_PAUSED_DELAY_S = 10 * 60.0
+_SOUND_LOADER = None
+MP4 = None
+MP4Cover = None
 
 CLIENT = OSCClient("localhost", 3002, encoding="utf-8")
+
+
+def local_sound_loader():
+    """Load Kivy local audio only when a local file is requested."""
+
+    global _SOUND_LOADER
+    if _SOUND_LOADER is None:
+        print("[service] initializing local audio backend")
+        from kivy.core.audio import SoundLoader
+
+        _SOUND_LOADER = SoundLoader
+        print("[service] local audio backend ready")
+    return _SOUND_LOADER
+
+
+def mp4_types():
+    """Load Mutagen only when local metadata is needed."""
+
+    global MP4, MP4Cover
+    if MP4 is None:
+        from mutagen.mp4 import MP4 as mp4_type, MP4Cover as mp4_cover_type
+
+        MP4 = mp4_type
+        MP4Cover = mp4_cover_type
+    return MP4, MP4Cover
 
 
 def audio_focus_action(focus_change, AudioManager):
@@ -401,9 +436,22 @@ def foreground_demotion_delay(status: PlaybackStatus):
 
     if status is PlaybackStatus.IDLE:
         return _FOREGROUND_IDLE_DELAY_S
-    if status is PlaybackStatus.PAUSED:
-        return _FOREGROUND_PAUSED_DELAY_S
     return None
+
+
+def android_app_task_present() -> bool | None:
+    """Recents task lifetime survives Activity destruction; unknown is not exit."""
+    if _SERVICE_CONTEXT is None:
+        return None
+    try:
+        manager = cast(
+            "android.app.ActivityManager",
+            _SERVICE_CONTEXT.getSystemService(_SERVICE_CONTEXT.ACTIVITY_SERVICE),
+        )
+        return manager.getAppTasks().size() > 0
+    except Exception as exc:
+        print(f"[service] task lifetime check failed: {exc}")
+        return None
 
 
 def demote_foreground_if_idle():
@@ -411,10 +459,9 @@ def demote_foreground_if_idle():
 
     global _FOREGROUND_ACTIVE, _IDLE_DEMOTION_TIMER
     _IDLE_DEMOTION_TIMER = None
-    if not _FOREGROUND_ACTIVE or GS.status not in (
-        PlaybackStatus.IDLE,
-        PlaybackStatus.PAUSED,
-    ):
+    if not _FOREGROUND_ACTIVE or GS.status is not PlaybackStatus.IDLE:
+        return False
+    if _SERVICE_CONTEXT is not None and android_app_task_present() is not False:
         return False
     if _SERVICE_INSTANCE is None:
         return False
@@ -586,9 +633,12 @@ def embed_cover_art_m4a_jpeg(
     video_id: str | None = None,
 ) -> bool:
     try:
-        audio = MP4(m4a_path)
+        mp4_type, mp4_cover_type = mp4_types()
+        audio = mp4_type(m4a_path)
         if jpeg_bytes:
-            audio["covr"] = [MP4Cover(jpeg_bytes, imageformat=MP4Cover.FORMAT_JPEG)]
+            audio["covr"] = [
+                mp4_cover_type(jpeg_bytes, imageformat=mp4_cover_type.FORMAT_JPEG)
+            ]
         if title:
             audio["\xa9nam"] = [title]
         if artist:
@@ -629,7 +679,8 @@ def _radio_metadata(
     video_id = None
     artist = None
     try:
-        audio = MP4(path)
+        mp4_type, _ = mp4_types()
+        audio = mp4_type(path)
         raw_id = audio.get("----:com.apple.iTunes:YouTubeVideoID", [])
         if isinstance(raw_id, (list, tuple)) and raw_id:
             value = raw_id[0]
@@ -827,15 +878,17 @@ class Gui_sounds:
                     return
                 previous_state = state
                 stop_event.wait(tick)
-            except RadioPlayerError:
-                self._handle_radio_player_error(snd, stop_event)
+            except RadioPlayerError as exc:
+                self._handle_radio_player_error(snd, stop_event, str(exc))
                 return
             except Exception as e:
                 print("Next-monitor loop error:", e)
                 stop_event.wait(tick)
 
     @playback_locked
-    def _handle_radio_player_error(self, sound, source_event: threading.Event) -> None:
+    def _handle_radio_player_error(
+        self, sound, source_event: threading.Event, message: str
+    ) -> None:
         if (
             self._next_thread_stop is not source_event
             or Gui_sounds.sound is not sound
@@ -844,7 +897,9 @@ class Gui_sounds:
         ):
             return
         self._radio_stream_failed(
-            self.radio.generation, self.radio.current, "Radio playback failed."
+            self.radio.generation,
+            self.radio.current,
+            message or "Radio playback failed.",
         )
 
     def _radio_seed(self) -> RadioSeed | None:
@@ -1036,6 +1091,10 @@ class Gui_sounds:
             return
         attempts = self._radio_attempts.get(track.video_id, 0) + 1
         self._radio_attempts[track.video_id] = attempts
+        if message:
+            # Keep the direct stream URL out of logs; the resolver and Media3
+            # bridge both return a safe diagnostic summary instead.
+            print(f"[radio] stream failed for {track.video_id}: {message}")
         if attempts == 1:
             self.send("data_info", "Refreshing this Radio stream...")
             self._launch_radio_stream(generation, track)
@@ -1208,7 +1267,11 @@ class Gui_sounds:
         Gui_sounds.file_to_load = path_to_try
         selected = os.path.basename(path_to_try)
         self.queue.select(selected, record_history=record_history)
-        Gui_sounds.sound = SoundLoader.load(Gui_sounds.file_to_load)
+        try:
+            Gui_sounds.sound = local_sound_loader().load(Gui_sounds.file_to_load)
+        except Exception as exc:
+            print(f"[service] local audio backend failed: {exc}")
+            Gui_sounds.sound = None
         if not Gui_sounds.sound:
             self._set_status(PlaybackStatus.IDLE)
             self.send("data_info", "Unable to load the selected audio file.")
@@ -1903,10 +1966,13 @@ class Gui_sounds:
 
 
 GS = Gui_sounds()
+print("[service] bootstrap: state ready")
 
 if __name__ == "__main__":
+    print("[service] bootstrap: starting OSC listener")
     SERVER = OSCThreadServer(encoding="utf8")
     SERVER.listen("localhost", port=3000, default=True)
+    print("[service] bootstrap: OSC listener ready")
     SERVER.bind("/load", GS.load)
     SERVER.bind("/play", GS.play)
     SERVER.bind("/pause", GS.pause)
@@ -1935,5 +2001,30 @@ if __name__ == "__main__":
             GS._sync_android_system_state(GS.status)
         else:
             print("[service] no service ctx; cannot start foreground")
+    missing_task_checks = 0
     while True:
-        _time.sleep(1)
+        _time.sleep(2)
+        if utils.get_platform() != "android":
+            continue
+        # Debounce task transitions; Activity/process reclamation alone leaves
+        # the task in Recents and must not stop music or paused playback.
+        task_present = android_app_task_present()
+        missing_task_checks = missing_task_checks + 1 if task_present is False else 0
+        if missing_task_checks < 2:
+            continue
+        print("[service] app task removed; stopping playback service")
+        GS.stop()
+        cancel_idle_foreground_demotion()
+        with contextlib.suppress(Exception):
+            if _SESSION is not None:
+                _SESSION.setActive(False)
+                _SESSION.release()
+        with contextlib.suppress(Exception):
+            SERVER.stop_all()
+        with contextlib.suppress(Exception):
+            if _CONTROL_RECEIVER is not None:
+                _SERVICE_CONTEXT.unregisterReceiver(_CONTROL_RECEIVER)
+        if _SERVICE_INSTANCE is not None:
+            _SERVICE_INSTANCE.stopForeground(True)
+            _SERVICE_INSTANCE.stopSelf()
+        break

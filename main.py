@@ -7,7 +7,12 @@ import uuid
 from runpy import run_path
 
 import utils
-from media_identity import audio_filename, display_title_from_stem, stable_media_id
+from media_identity import (
+    audio_filename,
+    display_title_from_stem,
+    find_existing_audio,
+    stable_media_id,
+)
 from playback_logic import (
     DownloadRequestTracker,
     PlaybackSnapshot,
@@ -151,7 +156,10 @@ from playlist_manager import PlaylistManager
 
 DOWNLOAD_INACTIVITY_TIMEOUT_SECONDS = 120.0
 SERVICE_RECONNECT_RETRY_SECONDS = 0.5
-SERVICE_RECONNECT_TIMEOUT_SECONDS = 10.0
+# A cold Android Python service can spend several seconds extracting its
+# bundle before it can answer OSC. Keep retrying long enough for that first
+# launch instead of presenting a false service-death error.
+SERVICE_RECONNECT_TIMEOUT_SECONDS = 45.0
 
 
 def default_cover_path():
@@ -356,6 +364,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self._ensure_music_service()
         self._service_reconnect_request_id = uuid.uuid4().hex
         GUILayout.service_playback_status = "pending"
+        with contextlib.suppress(Exception):
+            self.ids.info.text = "Starting playback service..."
         cancel_event(GUILayout.get_update_slider)
         GUILayout.get_update_slider = None
         with contextlib.suppress(Exception):
@@ -1885,10 +1895,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         return False
 
     def checkfile(self):
-        if getattr(self, "radio_active", False):
-            # Radio has no local file. Let the service resume its stream and
-            # publish the resulting playback state back to the GUI.
+        if getattr(self, "radio_active", False) or (
+            self.paused and getattr(self, "stream", None)
+        ):
+            # Resume the service-owned track after GUI restoration. Search
+            # identity may be absent or belong to a previously browsed song.
             GUILayout.send("play", "play")
+            GUILayout.send("iamawake", "")
             return
         MDApp.get_running_app().root.ids.play_btt.disabled = True
         MDApp.get_running_app().root.ids.info.text = ""
@@ -1902,11 +1915,18 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if not media_id:
             media_id = stable_media_id(str(getattr(self, "setytlink", "") or ""))
             self.selected_video_id = media_id
-        filename = audio_filename(title, media_id)
-        self.filetoplay = os.path.join(self.set_local_download, filename)
-        if os.path.isfile(self.filetoplay):
+        self.filetoplay = find_existing_audio(
+            self.set_local_download,
+            title,
+            media_id,
+        )
+        if self.filetoplay:
             self._complete_download_success()
             return
+        self.filetoplay = os.path.join(
+            self.set_local_download,
+            audio_filename(title, media_id),
+        )
         if not getattr(self, "setytlink", None):
             self._restore_after_download_failure(
                 "The selected track is not available to download."
