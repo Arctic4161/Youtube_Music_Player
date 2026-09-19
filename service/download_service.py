@@ -10,6 +10,7 @@ from pathlib import Path
 from oscpy.server import OSCThreadServer
 
 from service.main import Gui_sounds
+from service_lifecycle import clear_download_cancellation
 from utils import get_app_writable_dir
 
 
@@ -138,6 +139,7 @@ def run_download_service(payload: str | None = None) -> None:
     try:
         server.listen("localhost", port=DOWNLOAD_OSC_PORT, default=True)
         server.bind("/cancel_download", controller.cancel_download)
+        server.bind("/download_status", controller.report_download_status)
         request_payload = payload
         if request_payload is None:
             request_payload = os.environ.get("PYTHON_SERVICE_ARGUMENT", "")
@@ -162,6 +164,8 @@ def run_download_service(payload: str | None = None) -> None:
     finally:
         if completed and request_id is not None:
             _clear_active_download(request_id)
+            with contextlib.suppress(OSError):
+                clear_download_cancellation(get_app_writable_dir("Downloaded"), request_id)
         release_download_wakelock()
         with contextlib.suppress(Exception):
             server.stop_all()

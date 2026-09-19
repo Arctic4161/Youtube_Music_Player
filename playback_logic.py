@@ -85,6 +85,30 @@ class DownloadRequestTracker:
         self.last_activity = None
 
 
+@dataclass(frozen=True)
+class DownloadJob:
+    """The selection that created a download, independent of later browsing."""
+
+    request_id: str
+    url: str
+    title: str
+    video_id: str
+    thumbnail_url: str
+    download_dir: str
+    audio_path: str
+    playlist_id: str | None = None
+
+    def service_payload(self) -> str:
+        return json.dumps({
+            "request_id": self.request_id,
+            "url": self.url,
+            "title": self.title,
+            "video_id": self.video_id,
+            "thumbnail_url": self.thumbnail_url,
+            "download_dir": self.download_dir,
+        })
+
+
 def _non_negative_float(value: object) -> float:
     try:
         number = float(value)  # type: ignore[arg-type]
@@ -114,6 +138,10 @@ class PlaybackSnapshot:
     queue_size: int = 0
     playback_mode: str = "local"
     radio_available: bool = False
+    service_id: str = ""
+    revision: int = 0
+    command_id: str = ""
+    audio_path: str | None = None
 
     def to_json(self) -> str:
         duration = _non_negative_float(self.duration)
@@ -122,7 +150,7 @@ class PlaybackSnapshot:
             position = min(position, duration)
         return json.dumps(
             {
-                "version": 2,
+                "version": 3,
                 "request_id": self.request_id,
                 "status": self.status.value,
                 "track_name": self.track_name,
@@ -134,6 +162,10 @@ class PlaybackSnapshot:
                 "queue_size": max(0, int(self.queue_size)),
                 "playback_mode": self.playback_mode,
                 "radio_available": self.radio_available,
+                "service_id": self.service_id,
+                "revision": self.revision,
+                "command_id": self.command_id,
+                "audio_path": self.audio_path,
             },
             separators=(",", ":"),
         )
@@ -172,6 +204,10 @@ class PlaybackSnapshot:
         playback_mode = str(data.get("playback_mode") or "local").strip().lower()
         if playback_mode not in {"local", "radio"}:
             playback_mode = "local"
+        try:
+            revision = max(0, int(data.get("revision") or 0))
+        except (TypeError, ValueError, OverflowError):
+            return None
         return cls(
             request_id=request_id,
             status=status,
@@ -184,6 +220,10 @@ class PlaybackSnapshot:
             queue_size=queue_size,
             playback_mode=playback_mode,
             radio_available=_snapshot_bool(data.get("radio_available")),
+            service_id=str(data.get("service_id") or ""),
+            revision=revision,
+            command_id=str(data.get("command_id") or ""),
+            audio_path=str(data["audio_path"]) if data.get("audio_path") else None,
         )
 
 

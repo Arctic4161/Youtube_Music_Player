@@ -1,7 +1,9 @@
-"""Pure wrappers around a python-for-android generated service class."""
+"""Android service ownership and cancellation shared across processes."""
 
 from __future__ import annotations
 
+from hashlib import sha256
+from pathlib import Path
 from typing import Protocol
 
 
@@ -37,3 +39,29 @@ def stop_android_service(
         return False
     service_class.stop(context)
     return False
+
+
+def _download_cancellation_path(state_dir: str, request_id: str) -> Path:
+    # Hash caller-supplied IDs so a request cannot escape the private directory.
+    key = sha256(request_id.encode("utf-8")).hexdigest()
+    return Path(state_dir) / ".download-cancellations" / key
+
+
+def record_download_cancellation(state_dir: str, request_id: str) -> None:
+    """Persist cancellation even when the service has not opened its listener."""
+
+    path = _download_cancellation_path(state_dir, request_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
+
+
+def download_request_cancelled(state_dir: str, request_id: str) -> bool:
+    """Read cancellation intent without importing the GUI or service."""
+
+    return _download_cancellation_path(state_dir, request_id).is_file()
+
+
+def clear_download_cancellation(state_dir: str, request_id: str) -> None:
+    """Remove only the cancellation consumed by a terminal service request."""
+
+    _download_cancellation_path(state_dir, request_id).unlink(missing_ok=True)

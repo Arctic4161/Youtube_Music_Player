@@ -252,6 +252,8 @@ class AndroidMedia3RadioPlayer:
     """Pyjnius wrapper around the Java Media3 player kept in ``android_src``."""
 
     loop = False
+    STALL_TIMEOUT = 30.0
+    reports_buffering = True
 
     def __init__(self, url: str, headers: Mapping[str, str], context, *, proxy_url: str = "") -> None:
         self._proxy = None
@@ -275,11 +277,50 @@ class AndroidMedia3RadioPlayer:
                     bridge.release()
             raise RadioPlayerError(f"Unable to create Media3 Radio stream: {exc}") from exc
         self.length = 0.0
+        self._progress_at = None
+        self._progress_position = 0.0
+        self._has_progress = False
+
+    def _native_failure(self, reason: str) -> RadioPlayerError:
+        diagnostic = "native-diagnostic-unavailable"
+        with contextlib.suppress(Exception):
+            diagnostic = str(self._bridge.diagnostic())
+        tunnel = getattr(getattr(self, "_proxy", None), "diagnostic", "no-tunnel-diagnostic")
+        return RadioPlayerError(
+            f"Android Radio playback failed: {reason}; {diagnostic}; tunnel={tunnel}"
+        )
+
+    def poll_playback_status(self) -> str:
+        """Validate native progress independently of GUI polling and play intent."""
+        try:
+            status = str(self._bridge.playbackStatus())
+            position = max(0.0, float(self._bridge.positionSeconds()))
+        except Exception as exc:
+            # Native exception messages may contain signed URLs. The bridge's
+            # diagnostic uses only state values, error codes and cause types.
+            raise self._native_failure(type(exc).__name__) from exc
+        progress_at = getattr(self, "_progress_at", None)
+        if progress_at is None:
+            return status
+        now = time.monotonic()
+        if position > self._progress_position + 0.01:
+            self._progress_at = now
+            self._has_progress = True
+        self._progress_position = position
+        if status == "ended":
+            if not self._has_progress:
+                raise self._native_failure("ended before playback advanced")
+            return status
+        if now - self._progress_at >= self.STALL_TIMEOUT:
+            raise self._native_failure("no playback progress for 30 seconds")
+        if status == "playing" and self._has_progress and now - self._progress_at < 1.0:
+            return "playing"
+        return "buffering"
 
     @property
     def state(self) -> str:
         try:
-            return "play" if self._bridge.isPlaybackActive() else "stop"
+            return str(self._bridge.playbackState())
         except Exception as exc:
             diagnostic = getattr(
                 getattr(self, "_proxy", None), "diagnostic", "no-tunnel-diagnostic"
@@ -301,18 +342,30 @@ class AndroidMedia3RadioPlayer:
         self._bridge.setVolume(max(0.0, min(1.0, float(value))))
 
     def play(self) -> None:
-        self._bridge.play()
+        self._progress_position = self.get_pos()
+        self._progress_at = time.monotonic()
+        self._has_progress = False
+        try:
+            self._bridge.play()
+        except Exception as exc:
+            raise self._native_failure(type(exc).__name__) from exc
         self._refresh_length()
 
     def stop(self) -> None:
         self._bridge.pause()
+        self._progress_at = None
 
     def unload(self) -> None:
         self._proxy.close()
         self._bridge.release()
 
     def seek(self, position: float) -> None:
-        self._bridge.seekSeconds(max(0.0, float(position)))
+        target = max(0.0, float(position))
+        self._bridge.seekSeconds(target)
+        self._progress_position = target
+        self._has_progress = False
+        if getattr(self, "_progress_at", None) is not None:
+            self._progress_at = time.monotonic()
 
     def get_pos(self) -> float:
         self._refresh_length()

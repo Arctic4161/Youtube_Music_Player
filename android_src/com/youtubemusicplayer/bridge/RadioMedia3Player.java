@@ -3,12 +3,14 @@ package com.youtubemusicplayer.bridge;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.C;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.datasource.okhttp.OkHttpDataSource;
+import androidx.media3.datasource.HttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
 
 import java.util.HashMap;
@@ -97,6 +99,16 @@ public final class RadioMedia3Player {
                     )
                     .build();
             player.setMediaItem(MediaItem.fromUri(url));
+            player.addListener(new Player.Listener() {
+                @Override
+                public void onEvents(Player source, Player.Events events) {
+                    if (events.contains(Player.EVENT_PLAYBACK_STATE_CHANGED)
+                            || events.contains(Player.EVENT_IS_PLAYING_CHANGED)
+                            || events.contains(Player.EVENT_PLAYER_ERROR)) {
+                        Log.i("YMPRadio", diagnosticInternal());
+                    }
+                }
+            });
             player.prepare();
         });
     }
@@ -148,8 +160,8 @@ public final class RadioMedia3Player {
         return result[0];
     }
 
-    public boolean isPlaybackActive() {
-        boolean[] result = {false};
+    public String playbackState() {
+        String[] result = {"stop"};
         onMainSync(() -> {
             if (player != null) {
                 PlaybackException error = player.getPlayerError();
@@ -160,11 +172,62 @@ public final class RadioMedia3Player {
                             "Media3 " + PlaybackException.getErrorCodeName(error.errorCode));
                 }
                 int state = player.getPlaybackState();
-                result[0] = player.getPlayWhenReady()
-                        && (state == Player.STATE_READY || state == Player.STATE_BUFFERING);
+                if (player.isPlaying()) {
+                    result[0] = "play";
+                } else if (player.getPlayWhenReady()
+                        && (state == Player.STATE_READY || state == Player.STATE_BUFFERING)) {
+                    // Buffering or suppressed playback must not look like either
+                    // audible playback or EOF to the Python service.
+                    result[0] = "loading";
+                }
             }
         });
         return result[0];
+    }
+
+    public String playbackStatus() {
+        String[] result = {"idle"};
+        onMainSync(() -> {
+            if (player == null) return;
+            if (player.getPlayerError() != null) {
+                throw new IllegalStateException(diagnosticInternal());
+            }
+            if (player.getPlaybackState() == Player.STATE_ENDED) result[0] = "ended";
+            else if (!player.getPlayWhenReady()) result[0] = "paused";
+            else result[0] = player.isPlaying() ? "playing" : "buffering";
+        });
+        return result[0];
+    }
+
+    public String diagnostic() {
+        String[] result = {"released"};
+        onMainSync(() -> result[0] = diagnosticInternal());
+        return result[0];
+    }
+
+    private String diagnosticInternal() {
+        if (player == null) return "released";
+        String result = "state=" + player.getPlaybackState()
+                + "; playing=" + player.isPlaying()
+                + "; playWhenReady=" + player.getPlayWhenReady()
+                + "; suppression=" + player.getPlaybackSuppressionReason()
+                + "; positionMs=" + player.getCurrentPosition()
+                + "; bufferedMs=" + player.getTotalBufferedDuration();
+        PlaybackException error = player.getPlayerError();
+        if (error != null) {
+            result += "; error=" + PlaybackException.getErrorCodeName(error.errorCode);
+            Throwable cause = error.getCause();
+            for (int depth = 0; cause != null && depth < 5; depth++) {
+                // Never include exception messages, headers or signed stream URLs.
+                result += "; cause=" + cause.getClass().getSimpleName();
+                if (cause instanceof HttpDataSource.InvalidResponseCodeException) {
+                    result += "; http="
+                            + ((HttpDataSource.InvalidResponseCodeException) cause).responseCode;
+                }
+                cause = cause.getCause();
+            }
+        }
+        return result;
     }
 
     public void release() {

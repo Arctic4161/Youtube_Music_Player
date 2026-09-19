@@ -4,6 +4,7 @@ import re
 import sys
 import time
 from os import environ
+from functools import lru_cache
 from pathlib import Path
 
 _TEMP_DOWNLOAD_SUFFIXES = (".part", ".webm", ".ytdl")
@@ -53,16 +54,75 @@ def _desktop_downloads_dir() -> str:
     return cand if os.path.isdir(cand) else os.path.expanduser("~")
 
 
-def find_real_downloads():
+def find_real_downloads() -> str:
+    """Resolve the redirected Windows Downloads folder and release its buffer."""
     import ctypes
     from ctypes import wintypes as wt
+    from uuid import UUID
 
-    _FID = wt.GUID("{374DE290-123F-4565-9164-39C4925E467B}")
-    buf = wt.LPWSTR()
-    ctypes.windll.shell32.SHGetKnownFolderPath(
-        ctypes.byref(_FID), 0, None, ctypes.byref(buf)
+    class GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", ctypes.c_uint32),
+            ("Data2", ctypes.c_uint16),
+            ("Data3", ctypes.c_uint16),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    folder_id = GUID.from_buffer_copy(
+        UUID("374DE290-123F-4565-9164-39C4925E467B").bytes_le
     )
-    return buf.value
+    # Each call owns its function signatures, including its GUID type.
+    shell = ctypes.WinDLL("shell32")
+    ole = ctypes.WinDLL("ole32")
+    resolve = shell.SHGetKnownFolderPath
+    resolve.argtypes = [ctypes.POINTER(GUID), wt.DWORD, wt.HANDLE,
+                       ctypes.POINTER(wt.LPWSTR)]
+    resolve.restype = ctypes.c_int32
+    ole.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole.CoTaskMemFree.restype = None
+    ole.CoInitializeEx.argtypes = [ctypes.c_void_p, wt.DWORD]
+    ole.CoInitializeEx.restype = ctypes.c_int32
+    ole.CoUninitialize.argtypes = []
+    ole.CoUninitialize.restype = None
+    initialized = ole.CoInitializeEx(None, 2)
+    # RPC_E_CHANGED_MODE means this thread already has a different COM apartment.
+    if initialized < 0 and initialized != -2147417850:
+        raise OSError(f"COM initialization failed: 0x{initialized & 0xffffffff:08x}")
+    buffer = wt.LPWSTR()
+    try:
+        result = resolve(ctypes.byref(folder_id), 0, None, ctypes.byref(buffer))
+        if result < 0 or not buffer.value:
+            raise OSError(f"Downloads lookup failed: 0x{result & 0xffffffff:08x}")
+        return buffer.value
+    finally:
+        if buffer:
+            ole.CoTaskMemFree(ctypes.cast(buffer, ctypes.c_void_p))
+        if initialized >= 0:
+            ole.CoUninitialize()
+
+
+@lru_cache(maxsize=1)
+def _desktop_app_root() -> Path:
+    """Keep an existing library at the old fallback location; never move files."""
+    resolved = Path(_desktop_downloads_dir()) / "YouTube Music Player"
+    if sys.platform.startswith("win"):
+        legacy = Path.home() / "Downloads" / "YouTube Music Player"
+        played = legacy / "Downloaded" / "Played"
+        try:
+            has_library = played.is_dir() and any(
+                item.is_file() and (
+                    item.suffix.lower() in {".m4a", ".mp3", ".aac", ".flac", ".ogg", ".wav", ".part"}
+                    or item.name in {"playlists.json", "playlists.json.bak"}
+                )
+                for item in played.iterdir()
+            )
+            if has_library:
+                return legacy
+        except OSError:
+            # Retain the established library location when it cannot be inspected.
+            if played.is_dir():
+                return legacy
+    return resolved
 
 
 def safe_filename(name: str, default_prefix="track", max_len=120) -> str:
@@ -82,7 +142,7 @@ def get_app_writable_dir(subpath: str = "") -> str:
         return android_write_directory(sub)
 
     try:
-        dest = Path(_desktop_downloads_dir()) / "YouTube Music Player"
+        dest = _desktop_app_root()
         dest = dest / sub if sub else dest
         dest.mkdir(parents=True, exist_ok=True)
         return str(dest)

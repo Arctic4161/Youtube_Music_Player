@@ -14,12 +14,17 @@ from media_identity import (
     stable_media_id,
 )
 from playback_logic import (
+    DownloadJob,
     DownloadRequestTracker,
     PlaybackSnapshot,
     PlaybackStatus,
     normalize_playback_status,
 )
-from service_lifecycle import start_android_service, stop_android_service
+from service_lifecycle import (
+    record_download_cancellation,
+    start_android_service,
+    stop_android_service,
+)
 from search_logic import SearchResult, parse_search_results
 from timer_lifecycle import cancel_event, replace_event
 from ui_scaling import bounded_ui_scale
@@ -340,6 +345,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if request_id is None:
             return False
         with contextlib.suppress(Exception):
+            pending = getattr(GUILayout, "_pending_playback_command", None)
+            if pending is not None:
+                GUILayout.client.send_message("/command", [pending])
             GUILayout.send("iamawake", json.dumps({"request_id": request_id}))
         return True
 
@@ -393,6 +401,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             return
         if snapshot.playback_mode == "radio":
             self.stream = None
+            self._current_audio_path = snapshot.audio_path
             cover_path = snapshot.cover_path or default_cover_path()
             self.set_local = cover_path
             self.settitle = snapshot.track_name
@@ -406,7 +415,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             return
         filename = os.path.basename(snapshot.track_name)
         title, _extension = os.path.splitext(filename)
-        self.stream = os.path.join(self.set_local_download, filename)
+        self.stream = snapshot.audio_path or os.path.join(self.set_local_download, filename)
+        self._current_audio_path = self.stream
         derived_cover = os.path.join(self.set_local_download, f"{title}.jpg")
         cover_path = snapshot.cover_path or derived_cover
         if not os.path.exists(cover_path):
@@ -446,6 +456,19 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def _apply_playback_snapshot(self, snapshot: PlaybackSnapshot):
         status = snapshot.status
         GUILayout.service_playback_status = status.value
+        if status is PlaybackStatus.IDLE:
+            self.stream = None
+            self._current_audio_path = None
+            self.paused = False
+            GUILayout.playing_song = False
+            if getattr(self, "_browsing_search", False):
+                # A stop acknowledgment must not erase a search or download view.
+                return
+        elif getattr(self, "_browsing_search", False):
+            self._search_generation += 1
+            self._browsing_search = False
+        cancel_event(getattr(self, "loadingosctimer", None))
+        self.loadingosctimer = None
         self._apply_radio_state_values(
             active=snapshot.playback_mode == "radio",
             available=snapshot.radio_available,
@@ -491,14 +514,15 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         )
         is_radio = snapshot.playback_mode == "radio"
         is_loading = status is PlaybackStatus.LOADING
+        can_pause = status is PlaybackStatus.PLAYING or (is_radio and is_loading)
         self.paused = status is PlaybackStatus.PAUSED
         GUILayout.playing_song = status is PlaybackStatus.PLAYING
 
         with contextlib.suppress(Exception):
             self.ids.play_btt.disabled = status is not PlaybackStatus.PAUSED
             self.ids.play_btt.opacity = 1 if status is PlaybackStatus.PAUSED else 0
-            self.ids.pause_btt.disabled = status is not PlaybackStatus.PLAYING
-            self.ids.pause_btt.opacity = 1 if status is PlaybackStatus.PLAYING else 0
+            self.ids.pause_btt.disabled = not can_pause
+            self.ids.pause_btt.opacity = 1 if can_pause else 0
             self.ids.next_btt.disabled = is_loading or not has_queue_navigation
             self.ids.previous_btt.disabled = is_loading or not has_queue_navigation
             self.ids.next_btt.opacity = 1 if has_queue_navigation else 0
@@ -511,9 +535,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.ids.shuffle_btt.opacity = (
                 1 if has_queue_navigation and not is_radio else 0
             )
+            if self.ids.info.text == "Starting playback service...":
+                self.ids.info.text = ""
             if is_loading and not self.ids.info.text:
                 self.ids.info.text = "Preparing audio..."
-            elif not is_loading:
+            elif not is_loading and self.ids.info.text == "Preparing audio...":
                 self.ids.info.text = ""
             if GUILayout.slider is not None:
                 GUILayout.slider.disabled = is_loading
@@ -543,6 +569,26 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             return
         if active_request is None and snapshot.request_id:
             return
+        known_service = getattr(self, "_snapshot_service_id", None)
+        if snapshot.service_id:
+            if known_service and snapshot.service_id != known_service:
+                if active_request is None:
+                    return
+                # A correlated reconnect establishes a restarted service lifetime.
+                GUILayout._playback_command_id = ""
+            expected = getattr(GUILayout, "_playback_command_id", "")
+            if expected and snapshot.command_id != expected:
+                return
+            if (snapshot.service_id == known_service
+                    and snapshot.revision <= self._snapshot_revision):
+                return
+            self._snapshot_service_id = snapshot.service_id
+            self._snapshot_revision = snapshot.revision
+        elif known_service or getattr(GUILayout, "_playback_command_id", ""):
+            return
+        GUILayout._pending_playback_command = None
+        cancel_event(getattr(GUILayout, "_command_retry_event", None))
+        GUILayout._command_retry_event = None
         self._cancel_service_reconnect()
         if utils.get_platform() == "android":
             GUILayout.service_started = True
@@ -560,6 +606,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     @mainthread
     def apply_radio_state(self, *values):
+        if getattr(self, "_snapshot_service_id", None):
+            return
         try:
             raw = "".join(
                 bytes(value).decode("utf-8", "ignore")
@@ -614,7 +662,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
         Clock.schedule_once(_do, 0)
 
+    @mainthread
     def check_are_we_playing(self, *val):
+        if getattr(self, "_snapshot_service_id", None):
+            return
         raw = "".join(val)
         status = normalize_playback_status(raw)
         if status is not None:
@@ -676,9 +727,17 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.pause_btt.disabled = arg2
         MDApp.get_running_app().root.ids.pause_btt.opacity = arg3
 
+    def _detach_download_playback(self):
+        """Keep the job running while relinquishing its right to start playback."""
+        self._download_autoplay_id = None
+
+    def _select_playback(self):
+        self._search_generation = getattr(self, "_search_generation", 0) + 1
+        self._browsing_search = False
+        self._detach_download_playback()
+
     def stop(self):
-        if hasattr(self, "_cancel_download_wait"):
-            self._cancel_download_wait()
+        self._detach_download_playback()
         if GUILayout.slider is not None:
             GUILayout.slider.disabled = True
             GUILayout.slider.opacity = 0
@@ -704,6 +763,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def next(self):
         self.set_next_previous_bttns()
         if self.playlist_mode:
+            self._select_playback()
             GUILayout.send("next", self.playlist_mode)
         else:
             self.count = self.count + 1
@@ -712,12 +772,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def previous(self):
         self.set_next_previous_bttns()
         if self.playlist_mode:
+            self._select_playback()
             GUILayout.send("previous", self.playlist_mode)
         else:
             self.count = self.count - 1
             self.retrieve_text()
 
     def toggle_radio(self):
+        self._select_playback()
         if getattr(self, "radio_active", False):
             GUILayout.send("stop_radio", "")
         elif getattr(self, "radio_available", False):
@@ -737,46 +799,47 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         app.root.ids.pause_btt.opacity = 1
 
     @staticmethod
-    def send(message_type, message):
-        if message_type == "seek_seconds":
-            try:
-                secs = float(message)
-            except Exception:
-                secs = 0.0
-            GUILayout.client.send_message("/seek_seconds", [secs])
-            return
+    def _retry_playback_command(_dt):
+        pending = getattr(GUILayout, "_pending_playback_command", None)
+        if pending is None:
+            return False
+        if time.monotonic() - GUILayout._command_retry_started_at >= SERVICE_RECONNECT_TIMEOUT_SECONDS:
+            GUILayout._pending_playback_command = None
+            GUILayout._playback_command_id = ""
+            GUILayout._command_retry_event = None
+            MDApp.get_running_app().root.begin_service_reconnect()
+            return False
+        with contextlib.suppress(Exception):
+            GUILayout.client.send_message("/command", [pending])
+        return True
 
+    @staticmethod
+    def send(message_type, message):
         message = f"{message}"
-        if message_type == "load":
-            GUILayout.client.send_message("/load", message)
-        elif message_type == "play":
-            GUILayout.client.send_message("/play", message)
-        elif message_type == "pause":
-            GUILayout.client.send_message("/pause", message)
-        elif message_type == "next":
-            GUILayout.client.send_message("/next", message)
-        elif message_type == "stop":
-            GUILayout.client.send_message("/stop", message)
-        elif message_type == "playlist":
-            GUILayout.client.send_message("/playlist", [message])
-        elif message_type == "navigation_mode":
-            GUILayout.client.send_message("/navigation_mode", message)
-        elif message_type == "update_load_fs":
-            GUILayout.client.send_message("/update_load_fs", message)
-        elif message_type == "previous":
-            GUILayout.client.send_message("/previous", message)
-        elif message_type == "start_radio":
-            GUILayout.client.send_message("/start_radio", message)
-        elif message_type == "stop_radio":
-            GUILayout.client.send_message("/stop_radio", message)
-        elif message_type == "iamawake":
-            GUILayout.client.send_message("/iamawake", message)
-        elif message_type == "loop":
-            GUILayout.client.send_message("/loop", message)
-        elif message_type == "shuffle":
-            GUILayout.client.send_message("/shuffle", message)
-        elif message_type == "get_update_slider":
-            GUILayout.client.send_message("/get_update_slider", message)
+        commands = {
+            "load", "play", "pause", "stop", "next", "previous", "start_radio",
+            "stop_radio", "playlist", "navigation_mode", "loop", "shuffle",
+            "seek_seconds", "update_load_fs",
+        }
+        if message_type in commands:
+            GUILayout._command_sequence += 1
+            client_id = GUILayout._command_client_id
+            sequence = GUILayout._command_sequence
+            GUILayout._playback_command_id = f"{client_id}:{sequence}"
+            payload = json.dumps({
+                "client_id": client_id, "sequence": sequence,
+                "command": message_type, "value": message,
+            })
+            GUILayout._pending_playback_command = payload
+            GUILayout._command_retry_started_at = time.monotonic()
+            with contextlib.suppress(OSError):
+                GUILayout.client.send_message("/command", [payload])
+            GUILayout._command_retry_event = replace_event(
+                getattr(GUILayout, "_command_retry_event", None),
+                lambda: Clock.schedule_interval(GUILayout._retry_playback_command, 0.5),
+            )
+        elif message_type in {"iamawake", "get_update_slider"}:
+            GUILayout.client.send_message(f"/{message_type}", [message])
         elif message_type == "downloadyt":
             if utils.get_platform() == "android":
                 service_class, activity = _android_download_service_handles()
@@ -785,14 +848,15 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                     context=activity,
                     argument=message,
                 )
+                # p4a ignores new start arguments while its service thread lives.
+                # Ask the running service which request it actually accepted.
+                if GUILayout.download_client is not None:
+                    GUILayout.download_client.send_message("/download_status", [""])
             else:
                 GUILayout.client.send_message("/downloadyt", [message])
         elif message_type == "cancel_download":
-            client = (
-                GUILayout.download_client
-                if utils.get_platform() == "android"
-                else GUILayout.client
-            )
+            client = (GUILayout.download_client if utils.get_platform() == "android"
+                      else GUILayout.client)
             if client is not None:
                 client.send_message("/cancel_download", [message])
 
@@ -896,6 +960,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             )
 
     def _playlist_on_select(self, pid: str):
+        self._detach_download_playback()
         self.screen2_is_downloads = False
         self._playlist_manager.set_active(pid)
         self.refresh_playlist()
@@ -1272,6 +1337,18 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.download_tracker = DownloadRequestTracker(
             timeout_seconds=DOWNLOAD_INACTIVITY_TIMEOUT_SECONDS
         )
+        self._pending_android_download = None
+        self._download_job = None
+        self._download_autoplay_id = None
+        self._browsing_search = False
+        self._current_audio_path = None
+        self._snapshot_service_id = None
+        self._snapshot_revision = -1
+        GUILayout._command_client_id = uuid.uuid4().hex
+        GUILayout._command_sequence = 0
+        GUILayout._playback_command_id = ""
+        GUILayout._pending_playback_command = None
+        GUILayout._command_retry_event = None
         self.settitle = None
         self.fileosc_loaded = None
         self.length = None
@@ -1452,11 +1529,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 toast("No track selected.")
                 return
 
-            current_base = (
-                os.path.basename(self.stream) if getattr(self, "stream", None) else None
+            target = os.path.normcase(os.path.realpath(track_path))
+            current_paths = (
+                getattr(self, "_current_audio_path", None), getattr(self, "stream", None)
             )
-            target_base = os.path.basename(track_path)
-            if current_base and target_base and current_base == target_base:
+            if any(path and os.path.normcase(os.path.realpath(path)) == target
+                   for path in current_paths):
                 with contextlib.suppress(Exception):
                     toast("Can't delete the current track. Stop playback first.")
                 return
@@ -1505,6 +1583,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             toast("Delete failed.")
 
     def getting_song(self, message):
+        self._select_playback()
         try:
             if getattr(self, "screen2_is_downloads", False):
                 songs = self.get_play_list() or []
@@ -1514,8 +1593,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         except Exception:
             self._send_active_playlist_to_service()
         GUILayout.send("update_load_fs", "update_load_fs")
-        if GUILayout.playing_song:
-            self.stop()
+        # An explicit selection supersedes loading, paused and playing requests.
+        self.stop()
         self.stream = os.path.join(
             get_app_writable_dir("Downloaded/Played"),
             f"{message}",
@@ -1544,35 +1623,26 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     @mainthread
     def update_image(self, *val):
+        if getattr(self, "_snapshot_service_id", None):
+            # Versioned snapshots already carry the artwork for their own track.
+            return
         raw = "".join(val).strip()
-        if raw.startswith("['") and raw.endswith("']"):
-            raw = raw[2:-2]
-        elif raw.startswith('["') and raw.endswith('"]'):
-            raw = raw[2:-2]
-        if (raw.startswith("'") and raw.endswith("'")) or (
-            raw.startswith('"') and raw.endswith('"')
-        ):
-            raw = raw[1:-1]
-        filename = os.path.basename(raw)
-        base, ext = os.path.splitext(filename)
-        if not ext:
-            ext = ".m4a"
-            filename = base + ext
-        self.stream = os.path.join(self.set_local_download, filename)
-        self.set_local = os.path.join(self.set_local_download, f"{base}.jpg")
-        if not os.path.exists(self.set_local):
-            self.set_local = default_cover_path()
-        with contextlib.suppress(Exception):
-            MDApp.get_running_app().root.ids.imageView.source = str(self.set_local)
-            if utils.get_platform() == "android":
-                MDApp.get_running_app().root.ids.imageView.size_hint_x = 0.7
-                MDApp.get_running_app().root.ids.imageView.size_hint_y = 0.7
-
-        self.settitle = display_title_from_stem(base)
-        settitle1 = (
-            f"{self.settitle[:51]}..." if len(self.settitle) > 51 else self.settitle
-        )
-        MDApp.get_running_app().root.ids.song_title.text = settitle1
+        if raw.startswith("["):
+            with contextlib.suppress(ValueError, TypeError):
+                values = json.loads(raw)
+                raw = str(values[0]) if isinstance(values, list) and values else raw
+        raw = raw.strip("\"'")
+        if raw.startswith(("https://", "http://")):
+            cover = raw
+        else:
+            base, extension = os.path.splitext(os.path.basename(raw))
+            cover = raw if extension.lower() in {".jpg", ".jpeg", ".png", ".webp"} else (
+                os.path.join(self.set_local_download, f"{base}.jpg")
+            )
+            if not os.path.isfile(cover):
+                cover = default_cover_path()
+        self.set_local = cover
+        MDApp.get_running_app().root.ids.imageView.source = cover
 
     def make_slider(self):
         if GUILayout.slider is None:
@@ -1629,6 +1699,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         # Invalidate any older worker even when this request exits early (for
         # example, when both the search field and current title are empty).
         self._search_generation += 1
+        self._browsing_search = True
         generation = self._search_generation
         GUILayout.send("update_load_fs", "update_load_fs")
         self.paused = False
@@ -1753,21 +1824,33 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             MDApp.get_running_app().root.ids.info.text = "Error downloading Music"
         self.paused = False
 
+    def _new_download_job(self, request_id):
+        manager = getattr(self, "_playlist_manager", None)
+        playlist = manager.active_playlist() if manager else None
+        self._download_job = DownloadJob(
+            request_id=request_id, url=self.setytlink, title=self.settitle,
+            video_id=self.selected_video_id, thumbnail_url=self.set_local or "",
+            download_dir=self.set_local_download, audio_path=self.filetoplay,
+            playlist_id=playlist.id if playlist else None,
+        )
+        self._download_autoplay_id = request_id
+        self.download_tracker.begin(request_id, now=time.monotonic())
+
     @mainthread
     def download_yt(self, request_id):
-        MDApp.get_running_app().root.ids.next_btt.disabled = True
-        MDApp.get_running_app().root.ids.previous_btt.disabled = True
-        MDApp.get_running_app().root.ids.info.text = "Downloading audio... Please wait"
-        payload = json.dumps(
-            {
-                "request_id": request_id,
-                "url": self.setytlink,
-                "title": self.settitle,
-                "video_id": self.selected_video_id,
-                "thumbnail_url": self.set_local,
-                "download_dir": self.set_local_download,
-            }
-        )
+        job = self._download_job
+        if job is None or job.request_id != request_id or not self.download_tracker.accepts(request_id):
+            return
+        if self._download_autoplay_id == request_id:
+            self.ids.next_btt.disabled = True
+            self.ids.previous_btt.disabled = True
+            self.ids.info.text = "Downloading audio... Please wait"
+        payload = job.service_payload()
+        if utils.get_platform() == "android":
+            self._pending_android_download = (request_id, payload)
+        self._send_download_request(request_id, payload)
+
+    def _send_download_request(self, request_id, payload):
         try:
             GUILayout.send("downloadyt", payload)
         except Exception as exc:
@@ -1784,6 +1867,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     @mainthread
     def file_is_downloaded(self, *val):
         """Accept legacy service results during the playback protocol transition."""
+        if self.download_tracker.active_id is not None:
+            # Structured requests require a matching request_id, including errors.
+            return
         maybe = "".join(val)
         if maybe == "nope":
             message = self.ids.info.text or "Download failed. Tap Play to retry."
@@ -1801,7 +1887,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             return
         if not self.download_tracker.touch(request_id, now=time.monotonic()):
             return
-        self.ids.info.text = "Downloading audio... Please wait\n" f"{message}"
+        self._pending_android_download = None
+        if self._download_autoplay_id == request_id:
+            self.ids.info.text = "Downloading audio... Please wait\n" f"{message}"
 
     @mainthread
     def download_result(self, *val):
@@ -1820,7 +1908,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 message or "Download failed. Tap Play to retry."
             )
             return
-        expected = os.path.normcase(os.path.realpath(self.filetoplay or ""))
+        job = self._download_job
+        if job is None or job.request_id != request_id:
+            return
+        expected = os.path.normcase(os.path.realpath(job.audio_path))
         reported = os.path.normcase(os.path.realpath(str(audio_path or "")))
         if not expected or reported != expected or not os.path.isfile(expected):
             self._restore_after_download_failure(
@@ -1831,19 +1922,14 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     @mainthread
     def update_info(self, *val):
-        msg = "".join(val)
-        if self.download_tracker.active_id:
-            self.download_tracker.touch(
-                self.download_tracker.active_id,
-                now=time.monotonic(),
-            )
-            MDApp.get_running_app().root.ids.info.text = (
-                "Downloading audio... Please wait\n" f"{msg}"
-            )
-            return
-        MDApp.get_running_app().root.ids.info.text = msg
+        # Playback messages are not download heartbeats. Only correlated progress
+        # may extend that job's inactivity deadline.
+        MDApp.get_running_app().root.ids.info.text = "".join(val)
 
     def _cancel_download_wait(self, *, notify_service: bool = True):
+        self._pending_android_download = None
+        self._download_job = None
+        self._download_autoplay_id = None
         cancel_event(self.loadingfiletimer)
         self.loadingfiletimer = None
         tracker = getattr(self, "download_tracker", None)
@@ -1851,6 +1937,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             request_id = tracker.active_id
             tracker.cancel()
             if notify_service and request_id:
+                if utils.get_platform() == "android":
+                    try:
+                        record_download_cancellation(
+                            get_app_writable_dir("Downloaded"), request_id
+                        )
+                    except OSError as exc:
+                        print(f"[download] unable to persist cancellation: {exc}")
                 with contextlib.suppress(Exception):
                     GUILayout.send(
                         "cancel_download",
@@ -1858,7 +1951,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                     )
 
     def _restore_after_download_failure(self, message):
+        job = getattr(self, "_download_job", None)
+        background = job is not None and self._download_autoplay_id != job.request_id
         self._cancel_download_wait()
+        if background:
+            with contextlib.suppress(Exception):
+                toast(str(message))
+            return
         self.paused = False
         GUILayout.playing_song = False
         GUILayout.service_playback_status = PlaybackStatus.IDLE.value
@@ -1872,23 +1971,46 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         ids.previous_btt.disabled = False
 
     def _complete_download_success(self):
-        self._cancel_download_wait(notify_service=False)
-        if not self.filetoplay or not os.path.isfile(self.filetoplay):
-            self._restore_after_download_failure(
-                "Downloaded audio file was not found. Tap Play to retry."
-            )
+        job = self._download_job
+        if job is None or not self.download_tracker.accepts(job.request_id):
             return
-        self.sync_playlist_set_load()
-        # The downloaded file is now part of the active playlist, or the
-        # Downloads queue when no playlist is selected.
+        if not os.path.isfile(job.audio_path):
+            self._restore_after_download_failure("Downloaded audio file was not found. Tap Play to retry.")
+            return
+        autoplay = self._download_autoplay_id == job.request_id
+        self._cancel_download_wait(notify_service=False)
+        manager = getattr(self, "_playlist_manager", None)
+        if manager and job.playlist_id:
+            with contextlib.suppress(Exception):
+                manager.add_tracks(job.playlist_id, [job.audio_path], video_id=job.video_id)
+        # Update the library without replacing the service's current queue.
+        was_downloads = getattr(self, "screen2_is_downloads", False)
+        with contextlib.suppress(Exception):
+            self.refresh_playlist()
+        self.screen2_is_downloads = was_downloads
+        if not autoplay:
+            with contextlib.suppress(Exception):
+                toast("Download complete.")
+            return
+        self.filetoplay = job.audio_path
+        self.selected_video_id = job.video_id
+        self.settitle = job.title
+        self.setytlink = job.url
+        self._send_active_playlist_to_service()
+        self._browsing_search = False
         self.playlist_mode = True
         self.play_it()
 
     def _check_download_timeout(self, dt):
         if self.download_tracker.active_id is None:
             return False
-        if not self.download_tracker.expired(now=time.monotonic()):
+        if getattr(MDApp.get_running_app(), "_gui_backgrounded", False):
             return True
+        if not self.download_tracker.expired(now=time.monotonic()):
+            pending = self._pending_android_download
+            if pending is not None and self.download_tracker.accepts(pending[0]):
+                self._send_download_request(*pending)
+            return self.download_tracker.active_id is not None
         self._restore_after_download_failure(
             "The download stopped responding. Tap Play to retry."
         )
@@ -1921,7 +2043,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             media_id,
         )
         if self.filetoplay:
-            self._complete_download_success()
+            self._select_playback()
+            self.sync_playlist_set_load()
+            self.playlist_mode = True
+            self.play_it()
             return
         self.filetoplay = os.path.join(
             self.set_local_download,
@@ -1932,10 +2057,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 "The selected track is not available to download."
             )
             return
-        self._cancel_download_wait()
+        if self.download_tracker.active_id is not None:
+            self.ids.info.text = "A download is already running. Try again when it finishes."
+            self.ids.play_btt.disabled = False
+            return
         request_id = uuid.uuid4().hex
-        self.download_tracker.begin(request_id, now=time.monotonic())
-        GUILayout.service_playback_status = PlaybackStatus.LOADING.value
+        self._new_download_job(request_id)
         self.download_yt(request_id)
         self.loadingfiletimer = replace_event(
             self.loadingfiletimer,
@@ -2035,6 +2162,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     @mainthread
     def set_slider(self, *val):
+        if getattr(self, "_snapshot_service_id", None):
+            return
         self.length = float("".join(val))
         GUILayout.slider.max = self.length
         ty_res = time.gmtime(self.length)
@@ -2107,6 +2236,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     @mainthread
     def reset_gui(self, *val):
         """Reset GUI to a clean idle state when the last track finishes."""
+        if getattr(self, "_snapshot_service_id", None):
+            return
         self.gui_reset = True
         self.paused = False
         self.playlist_mode = False
@@ -2264,12 +2395,16 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         GUILayout.get_update_slider = None
         cancel_event(getattr(self, "loadingfiletimer", None))
         self.loadingfiletimer = None
+        self._pending_android_download = None
         cancel_event(getattr(self, "loadingosctimer", None))
         self.loadingosctimer = None
         with contextlib.suppress(Exception):
             GUILayout.send("stop", "app closing")
         with contextlib.suppress(Exception):
             self.server.stop_all()
+        cancel_event(getattr(GUILayout, "_command_retry_event", None))
+        GUILayout._command_retry_event = None
+        GUILayout._pending_playback_command = None
 
 
 class Musicapp(MDApp):
@@ -2312,6 +2447,8 @@ class Musicapp(MDApp):
             # must continue in that case.
             self._cancel_resume_handshake()
             self._cancel_deferred_notification_permission()
+            cancel_event(getattr(GUILayout, "_command_retry_event", None))
+            GUILayout._command_retry_event = None
             return
         self._cleanup_on_exit()
 
@@ -2427,6 +2564,9 @@ class Musicapp(MDApp):
         raise NotImplementedError("service stop not implemented on this platform")
 
     def on_pause(self):
+        self._gui_backgrounded = True
+        cancel_event(getattr(GUILayout, "_command_retry_event", None))
+        GUILayout._command_retry_event = None
         self._cancel_resume_handshake()
         root = getattr(self, "root", None)
         if root and hasattr(root, "_cancel_service_reconnect"):
@@ -2449,6 +2589,14 @@ class Musicapp(MDApp):
         """Re-sync this GUI process with the persistent playback service."""
 
         self._resume_handshake_event = None
+        self._gui_backgrounded = False
+        tracker = getattr(self.root, "download_tracker", None)
+        if tracker is not None and tracker.active_id:
+            # Time spent with a suspended GUI is not a download failure.
+            tracker.touch(tracker.active_id, now=time.monotonic())
+            if utils.get_platform() == "android" and GUILayout.download_client is not None:
+                with contextlib.suppress(Exception):
+                    GUILayout.download_client.send_message("/download_status", [""])
         self.root.begin_service_reconnect()
         # The first call can land before SDL recreates the Android surface.
         # Repeat after it has had a frame to become drawable.

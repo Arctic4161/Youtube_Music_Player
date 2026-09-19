@@ -5,6 +5,7 @@ import os
 import os.path
 import threading
 import time as _time
+import uuid
 from functools import wraps
 
 import requests
@@ -40,10 +41,12 @@ from radio_catalog import (
 )
 from radio_logic import RadioSeed, RadioSession, RadioTrack
 from radio_player import (
+    AndroidMedia3RadioPlayer,
     RadioPlayerError,
     create_radio_player,
     preload_android_media3_bridge,
 )
+from service_lifecycle import download_request_cancelled
 from utils import get_app_writable_dir
 
 if utils.get_platform() == "android":
@@ -77,6 +80,7 @@ _CONTROL_RECEIVER = None
 _FOREGROUND_ACTIVE = False
 _IDLE_DEMOTION_TIMER = None
 _FOREGROUND_IDLE_DELAY_S = 5.0
+RADIO_PLAYBACK_STALL_TIMEOUT_SECONDS = 30.0
 _SOUND_LOADER = None
 MP4 = None
 MP4Cover = None
@@ -169,7 +173,14 @@ if utils.get_platform() == "android":
             self._restore_volume()
             if action == "pause":
                 self.focus_granted = False
-                self.resume_on_gain = self.controller.status is PlaybackStatus.PLAYING
+                self.resume_on_gain = self.resume_on_gain or (
+                    self.controller.status is PlaybackStatus.PLAYING
+                    or (
+                        self.controller.radio.active
+                        and self.controller.status is PlaybackStatus.LOADING
+                        and not self.controller._radio_pause_requested
+                    )
+                )
                 self.controller.pause(abandon_focus=False)
             elif action == "stop":
                 self.focus_granted = False
@@ -751,6 +762,11 @@ class Gui_sounds:
         self.radio = RadioSession()
         self.local_navigation_enabled = False
         self.status = PlaybackStatus.IDLE
+        self._service_id = uuid.uuid4().hex
+        self._snapshot_revision = 0
+        self._gui_client_id = ""
+        self._gui_sequences: dict[str, int] = {}
+        self._command_id = ""
         self._state_lock = threading.RLock()
         self._next_thread: threading.Thread | None = None
         self._next_thread_stop: threading.Event | None = None
@@ -774,6 +790,52 @@ class Gui_sounds:
         if notify:
             with contextlib.suppress(Exception):
                 self.send("are_we", status.value)
+            if not self.radio.active:
+                self._publish_playback_snapshot()
+
+    @playback_locked
+    def dispatch_command(self, payload):
+        """Accept ordered GUI commands; native OSC routes remain available."""
+        try:
+            command = json.loads(payload)
+            client_id = command["client_id"]
+            sequence = command["sequence"]
+            name = command["command"]
+            value = command.get("value", "")
+            if not isinstance(client_id, str) or not client_id:
+                return
+            if (type(sequence) is not int or sequence < 1
+                    or not isinstance(name, str) or not isinstance(value, str)):
+                return
+        except (KeyError, TypeError, ValueError):
+            return
+        routes = {
+            "load": self.load, "play": self.play, "pause": self.pause,
+            "stop": self.stop, "next": self.next, "previous": self.previous_bttn,
+            "start_radio": self.start_radio, "stop_radio": self.stop_radio,
+            "playlist": self.play_list, "navigation_mode": self.set_navigation_mode,
+            "loop": self.on_loop_msg, "shuffle": self.shuffle,
+            "seek_seconds": self.seek_seconds, "update_load_fs": self.update_load_fs,
+        }
+        handler = routes.get(name)
+        if handler is None:
+            return
+        previous = self._gui_sequences.get(client_id, 0)
+        if sequence <= previous:
+            if sequence == previous and client_id == self._gui_client_id:
+                # Retry a lost acknowledgment without repeating Play/Next/Load.
+                self._publish_playback_snapshot()
+            return
+        if previous and client_id != self._gui_client_id:
+            # A recreated GUI owns a new client ID. Ignore its predecessor.
+            return
+        self._gui_client_id = client_id
+        self._gui_sequences[client_id] = sequence
+        self._command_id = f"{client_id}:{sequence}"
+        try:
+            handler(value)
+        finally:
+            self._publish_playback_snapshot()
 
     def _sync_android_system_state(self, status: PlaybackStatus):
         if utils.get_platform() != "android":
@@ -854,6 +916,8 @@ class Gui_sounds:
         end_fired = False
         previous_state = ""
         max_position = 0.0
+        last_position = None
+        last_progress_at = _time.monotonic()
 
         while not stop_event.is_set():
             try:
@@ -863,6 +927,25 @@ class Gui_sounds:
                 max_position = max(max_position, pos)
                 paused = bool(getattr(Gui_sounds, "paused", False))
                 state = getattr(snd, "state", "") if snd else ""
+                native_status = None
+                if isinstance(snd, AndroidMedia3RadioPlayer):
+                    native_status = snd.poll_playback_status()
+                    self._sync_radio_native_status(snd, stop_event, native_status)
+                elif getattr(snd, "reports_buffering", False) and not paused:
+                    now = _time.monotonic()
+                    if last_position is None or abs(pos - last_position) > 0.01:
+                        last_progress_at = now
+                        last_position = pos
+                    if now - last_progress_at >= RADIO_PLAYBACK_STALL_TIMEOUT_SECONDS:
+                        raise RadioPlayerError("Radio playback made no progress for 30 seconds.")
+                    if state in {"loading", "play"}:
+                        if not self._update_radio_playback_state(snd, stop_event, state):
+                            return
+                    if state == "loading":
+                        # A temporary buffer underrun is not an end-of-track
+                        # transition, even when the previous state was play.
+                        stop_event.wait(tick)
+                        continue
                 endish = has_reached_end(
                     position=pos,
                     duration=length,
@@ -872,6 +955,9 @@ class Gui_sounds:
                     paused=paused,
                     looping=bool(getattr(snd, "loop", False)) if snd else False,
                 )
+                if native_status is not None:
+                    # Buffering, suppression and a native pause are not EOF.
+                    endish = native_status == "ended"
                 if endish and not end_fired:
                     end_fired = True
                     self._advance_after_end(stop_event)
@@ -884,6 +970,43 @@ class Gui_sounds:
             except Exception as e:
                 print("Next-monitor loop error:", e)
                 stop_event.wait(tick)
+
+    @playback_locked
+    def _sync_radio_native_status(self, sound, source_event, native_status: str) -> None:
+        if (
+            self._next_thread_stop is not source_event
+            or source_event.is_set()
+            or Gui_sounds.sound is not sound
+            or Gui_sounds.paused
+            or not self.radio.active
+        ):
+            return
+        if native_status == "ended":
+            # The end handler accepts the buffering-to-ended transition too.
+            return
+        status = (
+            PlaybackStatus.PLAYING if native_status == "playing"
+            else PlaybackStatus.LOADING
+        )
+        if self.status is not status:
+            self._set_status(status)
+            self._publish_radio_snapshot()
+
+    @playback_locked
+    def _update_radio_playback_state(self, sound, source_event, state: str) -> bool:
+        if (
+            self._next_thread_stop is not source_event
+            or Gui_sounds.sound is not sound
+            or not self.radio.active
+            or self._radio_pause_requested
+            or Gui_sounds.paused
+        ):
+            return False
+        status = PlaybackStatus.LOADING if state == "loading" else PlaybackStatus.PLAYING
+        if self.status is not status:
+            self._set_status(status)
+            self._publish_radio_snapshot()
+        return True
 
     @playback_locked
     def _handle_radio_player_error(
@@ -937,10 +1060,16 @@ class Gui_sounds:
             ),
         )
 
-    def _publish_radio_snapshot(self) -> None:
-        """Push an uncorrelated update for a visible Radio state transition."""
+    @playback_locked
+    def _publish_playback_snapshot(self, request_id: str = "") -> None:
+        """Publish complete state with service lifetime and command ordering."""
+        self._snapshot_revision += 1
+        # GUI delivery must not interrupt playback when its process is absent.
+        with contextlib.suppress(OSError):
+            self.send("playback_snapshot", self._snapshot(request_id).to_json())
 
-        self.send("playback_snapshot", self._snapshot("").to_json())
+    def _publish_radio_snapshot(self) -> None:
+        self._publish_playback_snapshot()
 
     def _request_radio_refill(self, generation: int, source: RadioTrack) -> None:
         if generation in self._radio_refill_generations:
@@ -985,6 +1114,10 @@ class Gui_sounds:
         if not self.radio.active or self.radio.generation != generation:
             return
         added = self.radio.add_candidates(tracks)
+        if added:
+            count = len(self.radio.pending)
+            label = "track" if count == 1 else "tracks"
+            self.send("data_info", f"Radio ready — {count} {label} queued.")
         if self.radio.current is None or self._radio_waiting_for_refill:
             target = self.radio.next()
             if target is not None:
@@ -1075,7 +1208,9 @@ class Gui_sounds:
         self.send("data_info", "")
         self._send_radio_state()
         if self._radio_pause_requested:
-            self.pause()
+            # The original pause already handled focus. Keep a pending focus
+            # gain alive if the stream finishes resolving during an interruption.
+            self.pause(abandon_focus=False)
         else:
             self.play()
         if self.radio.needs_refill:
@@ -1100,6 +1235,12 @@ class Gui_sounds:
             self._launch_radio_stream(generation, track)
             return
         self.send("data_info", "Skipped an unavailable Radio track.")
+        self.stop_next_monitor()
+        stop_and_unload(Gui_sounds.sound)
+        Gui_sounds.sound = None
+        Gui_sounds.length = 0.0
+        Gui_sounds.song_local = None
+        Gui_sounds.paused = False
         self.radio.discard_current()
         target = self.radio.next()
         if target is not None:
@@ -1107,6 +1248,11 @@ class Gui_sounds:
             return
         seed = self.radio.seed
         if seed is not None:
+            self._radio_waiting_for_refill = True
+            self._set_status(
+                PlaybackStatus.PAUSED if self._radio_pause_requested else PlaybackStatus.LOADING
+            )
+            self._publish_radio_snapshot()
             self._request_radio_refill(
                 generation,
                 RadioTrack(seed.video_id, seed.title, seed.cover_path),
@@ -1195,7 +1341,9 @@ class Gui_sounds:
     def _advance_after_end(self, source_event: threading.Event | None = None):
         if source_event is not None and self._next_thread_stop is not source_event:
             return
-        if self.status is not PlaybackStatus.PLAYING:
+        if self.status is not PlaybackStatus.PLAYING and not (
+            self.radio.active and self.status is PlaybackStatus.LOADING
+        ):
             return
         if self.radio.active:
             if self.loop_enabled and self.radio.current is not None:
@@ -1318,6 +1466,14 @@ class Gui_sounds:
             )
             return
 
+        if utils.get_platform() == "android" and download_request_cancelled(
+            get_app_writable_dir("Downloaded"), request_id
+        ):
+            self._send_download_result(
+                request_id, status="cancelled", message="Download cancelled."
+            )
+            return
+
         with self._download_lock:
             active = self._download_thread
             if active is not None and active.is_alive():
@@ -1325,7 +1481,6 @@ class Gui_sounds:
                     request_id,
                     status="error",
                     message="Another download is already in progress.",
-                    set_idle=False,
                 )
                 return
             self._download_generation += 1
@@ -1349,7 +1504,7 @@ class Gui_sounds:
             self._download_cancel = cancel_event
             self._download_request_id = request_id
             self._download_thread = worker
-        self._set_status(PlaybackStatus.LOADING)
+        # Download lifetime is independent of playback in both service models.
         try:
             worker.start()
         except Exception as exc:
@@ -1359,6 +1514,20 @@ class Gui_sounds:
                 status="error",
                 message=f"Unable to start download: {exc}",
             )
+            return
+        self.report_download_status()
+
+    def report_download_status(self, *values) -> None:
+        """Acknowledge only the job this service actually accepted."""
+
+        with self._download_lock:
+            request_id = self._download_request_id
+            if not request_id or self._download_thread is None:
+                return
+        self.send(
+            "download_progress",
+            json.dumps({"request_id": request_id, "message": "Preparing audio download..."}),
+        )
 
     def _download_is_current(self, generation: int, request_id: str) -> bool:
         with self._download_lock:
@@ -1391,7 +1560,6 @@ class Gui_sounds:
             status=status,
             message=message,
             audio_path=audio_path,
-            set_idle=self.status is PlaybackStatus.LOADING,
         )
 
     def _download_worker(
@@ -1409,9 +1577,20 @@ class Gui_sounds:
         audio_path = os.path.join(set_local_download, f"{stem}.m4a")
         cover_path = os.path.join(set_local_download, f"{stem}.jpg")
 
-        def progress_hook(_progress: dict) -> None:
+        cancellation_dir = (
+            get_app_writable_dir("Downloaded") if utils.get_platform() == "android" else None
+        )
+
+        def check_cancelled() -> None:
+            if cancellation_dir is not None and download_request_cancelled(
+                cancellation_dir, request_id
+            ):
+                cancel_event.set()
             if cancel_event.is_set():
                 raise DownloadError("Download cancelled.")
+
+        def progress_hook(_progress: dict) -> None:
+            check_cancelled()
 
         try:
             os.makedirs(set_local_download, exist_ok=True)
@@ -1423,12 +1602,10 @@ class Gui_sounds:
                 proxy_url=os.environ.get("YMP_YTDLP_PROXY", "").strip() or None,
                 progress_hook=progress_hook,
             )
-            if cancel_event.is_set():
-                raise DownloadError("Download cancelled.")
+            check_cancelled()
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([setytlink])
-            if cancel_event.is_set():
-                raise DownloadError("Download cancelled.")
+            check_cancelled()
             if not os.path.exists(audio_path):
                 self._report_download_job(
                     generation,
@@ -1446,8 +1623,7 @@ class Gui_sounds:
                     img_data = resp.content
                 except Exception as exc:
                     print(f"[service] thumbnail fetch failed: {exc}")
-            if cancel_event.is_set():
-                raise DownloadError("Download cancelled.")
+            check_cancelled()
 
             if img_data:
                 try:
@@ -1463,6 +1639,7 @@ class Gui_sounds:
             ):
                 print("[service] embedded media metadata into m4a")
 
+            check_cancelled()
             self._report_download_job(
                 generation,
                 request_id,
@@ -1521,10 +1698,8 @@ class Gui_sounds:
         status: str,
         message: str,
         audio_path: str | None = None,
-        set_idle: bool = True,
     ):
-        if set_idle:
-            self._set_status(PlaybackStatus.IDLE)
+        # A download result must never publish playback IDLE to the GUI.
         if request_id:
             payload = {
                 "request_id": request_id,
@@ -1585,14 +1760,40 @@ class Gui_sounds:
                 release_wakelock()
                 return
             acquire_wakelock()
-        if not resume_sound(sound, paused_position):
+        if isinstance(sound, AndroidMedia3RadioPlayer) and self.radio.current is not None:
+            try:
+                sound.play()
+                if paused_position is not None:
+                    sound.seek(paused_position)
+            except Exception as exc:
+                self._radio_stream_failed(
+                    self.radio.generation, self.radio.current,
+                    str(exc) if isinstance(exc, RadioPlayerError) else type(exc).__name__,
+                )
+                return
+            resumed = True
+        else:
+            resumed = resume_sound(sound, paused_position)
+        if not resumed:
+            if self.radio.active and self.radio.current is not None:
+                self._radio_stream_failed(
+                    self.radio.generation,
+                    self.radio.current,
+                    "Unable to start Radio playback.",
+                )
+                return
             self.stop()
             self.send("data_info", "Unable to start audio playback.")
             self.send("reset_gui", "reset_gui")
             return
         Gui_sounds.paused = False
         Gui_sounds.song_local = None
-        self._set_status(PlaybackStatus.PLAYING)
+        self.send("data_info", "")
+        self._set_status(
+            PlaybackStatus.LOADING
+            if self.radio.active and getattr(sound, "reports_buffering", False)
+            else PlaybackStatus.PLAYING
+        )
         self.start_next_monitor()
         if self.radio.active:
             self._publish_radio_snapshot()
@@ -1625,10 +1826,23 @@ class Gui_sounds:
 
         sound = Gui_sounds.sound
         if sound is None:
-            self._set_status(PlaybackStatus.IDLE)
+            # A media-session seek can arrive while Radio is resolving a URL.
+            if not self.radio.active:
+                self._set_status(PlaybackStatus.IDLE)
             return
 
         secs = clamp_seek(secs, Gui_sounds.length)
+        if self.radio.active and self.status is PlaybackStatus.LOADING:
+            with contextlib.suppress(Exception):
+                sound.seek(secs)
+            Gui_sounds.paused = False
+            Gui_sounds.song_local = None
+            # Reset the seek's progress deadline and retain readiness/EOF checks.
+            # Only the monitor may promote a buffering stream to PLAYING.
+            self.start_next_monitor()
+            self.send("song_pos", str(int(secs)))
+            return
+
         was_playing = self.status is PlaybackStatus.PLAYING
         if not was_playing:
             self.stop_next_monitor()
@@ -1666,9 +1880,15 @@ class Gui_sounds:
             sound.seek(secs)
         Gui_sounds.paused = False
         Gui_sounds.song_local = None
-        self._set_status(PlaybackStatus.PLAYING)
+        self._set_status(
+            PlaybackStatus.LOADING
+            if isinstance(sound, AndroidMedia3RadioPlayer)
+            else PlaybackStatus.PLAYING
+        )
         self.start_next_monitor()
         self.send("song_pos", str(int(secs)))
+        if self.radio.active:
+            self._publish_radio_snapshot()
 
     @playback_locked
     def pause(self, *val, abandon_focus: bool = True):
@@ -1695,7 +1915,9 @@ class Gui_sounds:
 
     @playback_locked
     def toggle(self, *val):
-        if self.status is PlaybackStatus.PLAYING:
+        if self.status is PlaybackStatus.PLAYING or (
+            self.radio.active and self.status is PlaybackStatus.LOADING
+        ):
             self.pause()
         else:
             self.play()
@@ -1862,7 +2084,8 @@ class Gui_sounds:
         radio_seed = self.radio.seed if self.radio.active else None
         track_name = radio_track.title if radio_track is not None else (
             radio_seed.title if radio_seed is not None else (
-                self.queue.current if has_loaded_track else None
+                os.path.basename(str(Gui_sounds.file_to_load))
+                if has_loaded_track and Gui_sounds.file_to_load else None
             )
         )
         if track_name is None and has_loaded_track:
@@ -1901,15 +2124,20 @@ class Gui_sounds:
             queue_size=queue_size,
             playback_mode="radio" if self.radio.active else "local",
             radio_available=bool(self._radio_seed()),
+            service_id=self._service_id,
+            revision=self._snapshot_revision,
+            command_id=self._command_id,
+            audio_path=(
+                str(Gui_sounds.file_to_load)
+                if has_loaded_track and Gui_sounds.file_to_load
+                and os.path.isabs(str(Gui_sounds.file_to_load)) else None
+            ),
         )
 
     @playback_locked
     def refresh_gui(self, *val):
         request_id = self._refresh_request_id(val)
-        self.send("playback_snapshot", self._snapshot(request_id).to_json())
-        if Gui_sounds.load_from_service:
-            self.send("update_image", Gui_sounds.set_local)
-        self.send("are_we", self.status.value)
+        self._publish_playback_snapshot(request_id)
 
     @playback_locked
     def set_loop(self, want: bool):
@@ -1973,6 +2201,7 @@ if __name__ == "__main__":
     SERVER = OSCThreadServer(encoding="utf8")
     SERVER.listen("localhost", port=3000, default=True)
     print("[service] bootstrap: OSC listener ready")
+    SERVER.bind("/command", GS.dispatch_command)
     SERVER.bind("/load", GS.load)
     SERVER.bind("/play", GS.play)
     SERVER.bind("/pause", GS.pause)
