@@ -2102,6 +2102,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 if was_downloads:
                     with contextlib.suppress(Exception):
                         self._refresh_downloads_view()
+                else:
+                    with contextlib.suppress(Exception):
+                        self.second_screen2()
                 toast(f"Saved to {destination}.")
                 return True
             audio_path = download_audio_path(
@@ -2404,7 +2407,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             return
         if tracked:
             self._cancel_download_wait(notify_service=False)
-        # Update the library without replacing the service's current queue.
+        # Refresh Library and Playlist tabs without replacing the playback queue.
         was_downloads = getattr(self, "screen2_is_downloads", False)
         with contextlib.suppress(Exception):
             self.refresh_playlist()
@@ -2412,6 +2415,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if was_downloads:
             with contextlib.suppress(Exception):
                 self._refresh_downloads_view()
+        else:
+            with contextlib.suppress(Exception):
+                self.second_screen2()
         if not autoplay:
             with contextlib.suppress(Exception):
                 toast("Download complete.")
