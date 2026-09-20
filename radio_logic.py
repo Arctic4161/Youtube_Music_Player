@@ -39,20 +39,28 @@ class RadioSession:
 
     active: bool = False
     seed: RadioSeed | None = None
+    discovery_seed: RadioTrack | None = None
     current: RadioTrack | None = None
     pending: list[RadioTrack] = field(default_factory=list)
     history: list[RadioTrack] = field(default_factory=list)
     seen_ids: set[str] = field(default_factory=set)
     generation: int = 0
 
-    def start(self, seed: RadioSeed) -> int:
+    def start(
+        self, seed: RadioSeed | None, *, discovery_seed: RadioTrack | None = None,
+    ) -> int:
+        if discovery_seed is None:
+            if seed is None:
+                raise ValueError("Radio requires a discovery seed")
+            discovery_seed = RadioTrack(seed.video_id, seed.title, seed.cover_path)
         self.generation += 1
         self.active = True
         self.seed = seed
+        self.discovery_seed = discovery_seed
         self.current = None
         self.pending.clear()
         self.history.clear()
-        self.seen_ids = {seed.video_id}
+        self.seen_ids = {discovery_seed.video_id}
         return self.generation
 
     def stop(self) -> RadioSeed | None:
@@ -60,6 +68,7 @@ class RadioSession:
         self.generation += 1
         self.active = False
         self.seed = None
+        self.discovery_seed = None
         self.current = None
         self.pending.clear()
         self.history.clear()

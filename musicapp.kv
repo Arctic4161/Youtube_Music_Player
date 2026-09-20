@@ -117,6 +117,17 @@
                     disabled: True
 
                 MDIconButton:
+                    id: radio_save_btt
+                    icon: "progress-download" if root.radio_save_busy else "plus-circle-outline"
+                    tooltip_text: "Download in progress" if root.radio_save_busy else "Download song to playlist"
+                    pos_hint: {'center_x': 0.20 if root.radio_save_visible else -1, 'center_y': 0.15}
+                    theme_icon_color: "Custom"
+                    icon_color: app.theme_cls.primary_color
+                    on_release: root.save_radio_track()
+                    opacity: 1 if root.radio_save_visible else 0
+                    disabled: not root.radio_save_visible or not root.radio_save_available or root.radio_save_busy
+
+                MDIconButton:
                     id: repeat_btt
                     icon: "repeat"
                     pos_hint: {'center_x': 0.80, 'center_y': 0.15}
@@ -244,39 +255,12 @@
                     shorten: True
                     shorten_from: "right"
 
-                MDBoxLayout:
-                    adaptive_height: True
-                    spacing: "4dp"
-
-                    MDLabel:
-                        text: "Tap"
-                        font_style: "Caption"
-                        theme_text_color: "Secondary"
-                        adaptive_size: True
-
-                    MDIcon:
-                        icon: "play"
-                        theme_text_color: "Secondary"
-                        size_hint: None, None
-                        size: "18dp", "18dp"
-
-                    MDLabel:
-                        text: "to play"
-                        font_style: "Caption"
-                        theme_text_color: "Secondary"
-                        adaptive_size: True
-
-                    MDIcon:
-                        icon: "dots-vertical"
-                        theme_text_color: "Secondary"
-                        size_hint: None, None
-                        size: "18dp", "18dp"
-
-                    MDLabel:
-                        text: "for options"
-                        font_style: "Caption"
-                        theme_text_color: "Secondary"
-                        adaptive_size: True
+                MDLabel:
+                    text: "Play or options"
+                    font_style: "Caption"
+                    theme_text_color: "Secondary"
+                    shorten: True
+                    shorten_from: "right"
             MDIconButton:
                 icon: "play"
                 tooltip_text: "Play"

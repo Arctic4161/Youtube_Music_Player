@@ -144,6 +144,7 @@ class PlaybackSnapshot:
     revision: int = 0
     command_id: str = ""
     audio_path: str | None = None
+    video_id: str | None = None
 
     def to_json(self) -> str:
         duration = _non_negative_float(self.duration)
@@ -168,6 +169,7 @@ class PlaybackSnapshot:
                 "revision": self.revision,
                 "command_id": self.command_id,
                 "audio_path": self.audio_path,
+                "video_id": self.video_id,
             },
             separators=(",", ":"),
         )
@@ -226,6 +228,7 @@ class PlaybackSnapshot:
             revision=revision,
             command_id=str(data.get("command_id") or ""),
             audio_path=str(data["audio_path"]) if data.get("audio_path") else None,
+            video_id=str(data["video_id"]) if data.get("video_id") else None,
         )
 
 

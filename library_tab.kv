@@ -1,6 +1,5 @@
 #:import Window kivy.core.window.Window
 #:import MDFillRoundFlatIconButton kivymd.uix.button.MDFillRoundFlatIconButton
-#:import MDBottomNavigationItem kivymd.uix.bottomnavigation.MDBottomNavigationItem
 
 <ScaledLabelLibrary@MDLabel>:
     # default body size; override per-usage where needed
@@ -81,7 +80,8 @@
         pos_hint: {"center_y": 0.5}
 
 
-<LibraryTab@MDBottomNavigationItem>:
+<LibraryTab>:
+    # downloads_mode is initialized before children, while App.root is unset.
     # These ids are accessed from Python via self.library_tab.ids[...]
     name: "Screen 3"
     text: "Library"
@@ -118,8 +118,18 @@
                     id: playlist_btn_row
                     orientation: "horizontal"
                     size_hint_y: None
-                    height: max(btn_new.height, btn_import.height)
+                    height: max(dp(44), btn_new.height, btn_import.height)
                     spacing: dp(8)
+
+                    Button:
+                        id: btn_all_downloads
+                        text: "All Downloads"
+                        font_size: app.spx(14)
+                        background_normal: ""
+                        background_down: ""
+                        background_color: app.theme_cls.primary_color if root.downloads_mode else (0.32, 0.32, 0.32, 1)
+                        color: 1, 1, 1, 1
+                        on_release: app.root.select_all_downloads()
 
                     MDFillRoundFlatIconButton:
                         id: btn_new
@@ -181,6 +191,7 @@
                     MDFillRoundFlatIconButton:
                         id: btn_import
                         text: "Import"
+                        disabled: root.downloads_mode
                         icon: "file-plus"
                         size_hint: None, None
                         adaptive_width: True
@@ -192,6 +203,7 @@
                     MDIconButton:
                         icon: "format-list-numbered"
                         tooltip_text: "Reorder tracks"
+                        disabled: root.downloads_mode
                         on_release: app.root._playlist_open_reorder_dialog()
 
                 MDSeparator:
@@ -200,11 +212,11 @@
 
                 RecycleView:
                     id: rv_tracks
-                    viewclass: "PlaylistTrackRow"
+                    viewclass: "RecycleViewRow" if root.downloads_mode else "PlaylistTrackRow"
                     scroll_type: ['bars', 'content']
                     bar_width: dp(4) if Window.width < dp(520) else dp(6)
                     RecycleBoxLayout:
-                        default_size: None, dp(44) if Window.width < dp(520) else dp(52)
+                        default_size: None, dp(76) if root.downloads_mode else (dp(44) if Window.width < dp(520) else dp(52))
                         default_size_hint: 1, None
                         size_hint_y: None
                         height: self.minimum_height

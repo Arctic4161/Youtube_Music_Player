@@ -111,8 +111,10 @@ def validate_download_audio_path(audio_path: str, media_id: str) -> None:
         raise FileExistsError("Another video owns this download filename.")
 
 
-def find_existing_audio(directory: str, title: str, media_id: str) -> str | None:
-    """Find a downloaded audio file before the caller starts a new download."""
+def find_existing_audio(
+    directory: str, title: str, media_id: str, *, allow_legacy_title: bool = True,
+) -> str | None:
+    """Find existing audio, optionally requiring an exact stored media identity."""
 
     root = str(directory or "")
     clean_id = str(media_id or "").strip()
@@ -140,6 +142,9 @@ def find_existing_audio(directory: str, title: str, media_id: str) -> str | None
         pass
     if matches:
         return sorted(matches, key=lambda path: os.path.basename(path).casefold())[0]
+
+    if not allow_legacy_title:
+        return None
 
     legacy_stem = safe_filename(title)
     for extension in _AUDIO_EXTENSIONS:

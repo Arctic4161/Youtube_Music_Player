@@ -3,6 +3,7 @@ import contextlib
 import json
 import os
 import os.path
+import tempfile
 import threading
 import time as _time
 import uuid
@@ -14,7 +15,7 @@ from yt_dlp import DownloadError
 
 import utils
 import download_state
-from download_config import build_yt_dlp_options
+from download_config import build_yt_dlp_options, configured_proxy
 from media_identity import (
     display_title_from_stem,
     download_audio_path,
@@ -41,7 +42,7 @@ from radio_catalog import (
     resolve_radio_stream,
     search_fallback_tracks,
 )
-from radio_logic import RadioSeed, RadioSession, RadioTrack
+from radio_logic import RadioSeed, RadioSession, RadioTrack, is_valid_video_id
 from radio_player import (
     AndroidMedia3RadioPlayer,
     RadioPlayerError,
@@ -209,7 +210,21 @@ def playback_locked(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         with self._state_lock:
-            return method(self, *args, **kwargs)
+            depth = getattr(self, "_playback_call_depth", 0)
+            self._playback_call_depth = depth + 1
+            try:
+                # Native controls enter here directly. Nested stop/load calls
+                # belong to the enclosing transition, not a newer user choice.
+                if depth == 0 and method.__name__ in {
+                    "load", "stop_radio", "stop", "pause", "toggle", "next", "previous_bttn",
+                    "seek_seconds", "play_list", "set_navigation_mode", "update_load_fs",
+                }:
+                    cancel = getattr(self, "_cancel_download_playback", None)
+                    if cancel is not None:
+                        cancel()
+                return method(self, *args, **kwargs)
+            finally:
+                self._playback_call_depth = depth
 
     return wrapped
 
@@ -555,7 +570,48 @@ def update_foreground_notification(status: PlaybackStatus, track_name: str | Non
         print(f"[service] notification update failed: {exc}")
 
 
-def update_media_session_metadata(session, track_name, duration_seconds):
+def load_radio_notification_artwork(url):
+    """Fetch and decode a bounded cover off the playback thread via Radio's proxy."""
+    max_bytes = 2 * 1024 * 1024
+    with yt_dlp.YoutubeDL({
+        "proxy": configured_proxy(), "socket_timeout": 10,
+        "cachedir": False, "quiet": True, "no_warnings": True,
+    }) as ydl:
+        with ydl.urlopen(url) as response:
+            data = response.read(max_bytes + 1)
+    if not data or len(data) > max_bytes:
+        raise ValueError("Radio artwork is empty or too large.")
+
+    # Use Android's existing file decoder; the temporary image never enters
+    # Downloads and is removed after decoding. Only the current bitmap is kept.
+    image_file = tempfile.NamedTemporaryFile(
+        dir=get_app_writable_dir("Cache/RadioArtwork"), suffix=".img", delete=False,
+    )
+    try:
+        with image_file:
+            image_file.write(data)
+        BitmapFactory = autoclass("android.graphics.BitmapFactory")
+        Options = autoclass("android.graphics.BitmapFactory$Options")
+        options = Options()
+        options.inJustDecodeBounds = True
+        BitmapFactory.decodeFile(image_file.name, options)
+        if options.outWidth <= 0 or options.outHeight <= 0:
+            raise ValueError("Radio artwork is not a supported image.")
+        options.inSampleSize = 1
+        while max(options.outWidth, options.outHeight) > 512 * options.inSampleSize:
+            options.inSampleSize *= 2
+        options.inJustDecodeBounds = False
+        bitmap = BitmapFactory.decodeFile(image_file.name, options)
+        if bitmap is None:
+            raise ValueError("Radio artwork could not be decoded.")
+        return bitmap
+    finally:
+        os.unlink(image_file.name)
+
+
+def update_media_session_metadata(
+    session, track_name, duration_seconds, *, artwork_bitmap=None, cover_path=None,
+):
     if session is None:
         return
     MediaMetadata = autoclass("android.media.MediaMetadata")
@@ -569,13 +625,15 @@ def update_media_session_metadata(session, track_name, duration_seconds):
             MediaMetadata.METADATA_KEY_DURATION,
             max(0, int(float(duration_seconds) * 1000.0)),
         )
-    cover_path = os.path.splitext(track_name or "")[0] + ".jpg"
-    if os.path.isfile(cover_path):
+    bitmap = artwork_bitmap
+    if cover_path is None:
+        cover_path = os.path.splitext(track_name or "")[0] + ".jpg"
+    if bitmap is None and cover_path and os.path.isfile(cover_path):
         with contextlib.suppress(Exception):
             BitmapFactory = autoclass("android.graphics.BitmapFactory")
             bitmap = BitmapFactory.decodeFile(cover_path)
-            if bitmap is not None:
-                builder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, bitmap)
+    if bitmap is not None:
+        builder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, bitmap)
     session.setMetadata(builder.build())
 
 
@@ -777,9 +835,12 @@ class Gui_sounds:
         self._download_thread: threading.Thread | None = None
         self._download_cancel: threading.Event | None = None
         self._download_request_id: str | None = None
+        self._pending_download_playback = None
         self._radio_refill_generations: set[int] = set()
         self._radio_attempts: dict[str, int] = {}
         self._radio_stream_request_id = 0
+        self._notification_artwork_key = None
+        self._notification_artwork_bitmap = None
         self._radio_waiting_for_refill = False
         self._radio_pause_requested = False
         if utils.get_platform() == "android":
@@ -820,7 +881,12 @@ class Gui_sounds:
             "loop": self.on_loop_msg, "shuffle": self.shuffle,
             "seek_seconds": self.seek_seconds, "update_load_fs": self.update_load_fs,
         }
-        handler = routes.get(name)
+        if name == "select_downloads":
+            handler = self.select_downloads
+        elif name == "play_download":
+            handler = self.play_download
+        else:
+            handler = routes.get(name)
         if handler is None:
             return
         previous = self._gui_sequences.get(client_id, 0)
@@ -835,14 +901,247 @@ class Gui_sounds:
         self._gui_client_id = client_id
         self._gui_sequences[client_id] = sequence
         self._command_id = f"{client_id}:{sequence}"
+        previous_context = getattr(self, "_dispatch_playback_command", None)
+        self._dispatch_playback_command = (client_id, sequence)
         try:
+            if name in {
+                "load", "stop_radio", "stop", "pause", "next", "previous",
+                "seek_seconds", "navigation_mode",
+            }:
+                cancel = getattr(self, "_cancel_download_playback", None)
+                if cancel is not None:
+                    cancel(command_context=(client_id, sequence))
             handler(value)
         finally:
+            self._dispatch_playback_command = previous_context
             self._publish_playback_snapshot()
 
+    @playback_locked
+    def _cancel_download_playback(self, *, command_context=None):
+        """Revoke pending Play while preserving later ordered GUI requests."""
+        if utils.get_platform() != "android":
+            return
+        state_dir = get_app_writable_dir("Downloaded")
+        pending = self._pending_download_playback
+
+        def superseded(record):
+            if command_context is None or record is None:
+                return True
+            envelope = json.loads(record["command"])
+            client_id, sequence = command_context
+            return not (envelope["client_id"] == client_id and envelope["sequence"] > sequence)
+
+        cancel_pending = pending is not None and superseded(
+            download_state.playback_request(state_dir, pending["job"].request_id)
+        )
+        try:
+            if cancel_pending:
+                download_state.decide_playback(state_dir, pending["job"].request_id, "cancelled")
+            while records := download_state.pending_playbacks(state_dir):
+                preserved = False
+                for record in records:
+                    if superseded(record):
+                        download_state.decide_playback(state_dir, record["request_id"], "cancelled")
+                    else:
+                        preserved = True
+                if preserved:
+                    break
+        except OSError as exc:
+            print(f"[service] unable to cancel pending download playback: {exc}")
+        if cancel_pending:
+            self._pending_download_playback = None
+            self.stop(notify=False)
+            self._publish_playback_snapshot()
+
+    @playback_locked
+    def play_download(self, payload, *, journal_command=None):
+        """Own a user Play request while the independent downloader finishes."""
+        if utils.get_platform() != "android":
+            return
+        state_dir = get_app_writable_dir("Downloaded")
+        try:
+            selection = json.loads(payload)
+            request, playlist = selection["request"], selection["playlist"]
+            job = download_state.job_from_request(request)
+            if (job is None or not os.path.isabs(job.download_dir)
+                    or not os.path.isabs(job.audio_path)
+                    or not isinstance(playlist, list)
+                    or not all(isinstance(name, str) and name.strip()
+                               and name not in {".", ".."}
+                               and "/" not in name and "\\" not in name and "\x00" not in name
+                               for name in playlist)):
+                return
+            expected = download_audio_path(job.download_dir, job.title, job.video_id)
+            if os.path.normcase(os.path.realpath(job.audio_path)) != os.path.normcase(os.path.realpath(expected)):
+                return
+            record = download_state.playback_request(state_dir, job.request_id)
+            if record is None:
+                return
+            envelope = json.loads(record["command"])
+            if envelope["value"] != payload:
+                return
+            if journal_command is None:
+                if f"{envelope['client_id']}:{envelope['sequence']}" != self._command_id:
+                    return
+            elif journal_command != record["command"]:
+                return
+            if download_state.playback_decision(state_dir, job.request_id) is not None:
+                return
+            records = download_state.pending_playbacks(state_dir)
+            if not records or records[0]["request_id"] != job.request_id:
+                # A newer durable user choice already owns playback.
+                download_state.decide_playback(state_dir, job.request_id, "cancelled")
+                return
+            for older in records[1:]:
+                download_state.decide_playback(state_dir, older["request_id"], "cancelled")
+            previous = self._pending_download_playback
+            if previous is not None and previous["job"].request_id != job.request_id:
+                download_state.decide_playback(state_dir, previous["job"].request_id, "cancelled")
+        except (KeyError, TypeError, ValueError, OSError):
+            return
+        if self._pending_download_playback is not None and self._pending_download_playback["job"] == job:
+            return
+        self.stop(notify=False)
+        names = list(dict.fromkeys(playlist))
+        filename = os.path.basename(job.audio_path)
+        if filename not in names:
+            names.append(filename)
+        self._pending_download_playback = {"job": job, "playlist": names}
+        Gui_sounds.set_local_download = job.download_dir
+        Gui_sounds.load_from_service = False
+        Gui_sounds.file_to_load = job.audio_path
+        self.local_navigation_enabled = False
+        self._set_status(PlaybackStatus.LOADING)
+        # The download service releases its CPU lock after persisting success.
+        # Keep this consumer awake until it claims or abandons the handoff.
+        acquire_wakelock()
+        self.send("data_info", "Downloading audio... Please wait")
+
+    @playback_locked
+    def reconcile_download_playback(self):
+        """Replay lost Play packets and consume results without the GUI clock."""
+        if utils.get_platform() != "android":
+            return
+        state_dir = get_app_writable_dir("Downloaded")
+        try:
+            arms = download_state.pending_playbacks(state_dir)
+            for record in arms:
+                request_id = record["request_id"]
+                pending = self._pending_download_playback
+                if pending is not None and pending["job"].request_id == request_id:
+                    continue
+                if download_state.playback_decision(state_dir, request_id) is not None:
+                    continue
+                envelope = json.loads(record["command"])
+                client_id, sequence = envelope["client_id"], envelope["sequence"]
+                if not self._gui_client_id or (
+                    client_id == self._gui_client_id
+                    and sequence > self._gui_sequences.get(client_id, 0)
+                ):
+                    self.dispatch_command(record["command"])
+                else:
+                    # Housekeeping or a recreated GUI can advance command
+                    # ownership before this lost Play packet is adopted. The
+                    # verified durable arm still owns its uncancelled intent.
+                    self.play_download(envelope["value"], journal_command=record["command"])
+                    pending = self._pending_download_playback
+                    if pending is not None and pending["job"].request_id == request_id:
+                        # Fence its delayed original packet without changing
+                        # the current GUI owner or snapshot acknowledgment.
+                        self._gui_sequences[client_id] = max(
+                            sequence, self._gui_sequences.get(client_id, 0),
+                        )
+                pending = self._pending_download_playback
+                if pending is None or pending["job"].request_id != request_id:
+                    download_state.decide_playback(state_dir, request_id, "cancelled")
+            pending = self._pending_download_playback
+            if pending is None:
+                return
+            job = pending["job"]
+            decision = download_state.playback_decision(state_dir, job.request_id)
+            record = download_state.terminal_result(state_dir, job.request_id)
+            if decision is not None or not any(arm["request_id"] == job.request_id for arm in arms):
+                # An interrupted exclusive claim is also terminal. Its JSON
+                # may be unreadable, but pending_playbacks excludes the file.
+                self._pending_download_playback = None
+                self.stop(notify=False)
+                self._publish_playback_snapshot()
+                return
+            if record is None:
+                return
+            result = record["result"]
+            status = result.get("status")
+            expected = os.path.normcase(os.path.realpath(job.audio_path))
+            reported = os.path.normcase(os.path.realpath(str(result.get("audio_path") or "")))
+            valid = (
+                status == "success"
+                and download_state.job_from_request(record["request"]) == job
+                and reported == expected and os.path.isfile(expected)
+            )
+            outcome = "started" if valid else ("cancelled" if status == "cancelled" else "failed")
+            claimed = download_state.decide_playback(state_dir, job.request_id, outcome)
+            self._pending_download_playback = None
+            if not valid or not claimed:
+                self.stop(notify=False)
+                if not valid:
+                    message = ("Downloaded audio file was not available for playback."
+                               if status == "success" else result.get("message"))
+                    self.send("data_info", str(message or "Download could not be played."))
+                self._publish_playback_snapshot()
+                return
+            # Claim before native playback: retries, GUI ACK and service restart
+            # may reconcile this same completed request, but cannot restart it.
+            Gui_sounds.set_local_download = job.download_dir
+            Gui_sounds.load_from_service = False
+            Gui_sounds.playlist = list(pending["playlist"])
+            self.queue.set_items(Gui_sounds.playlist)
+            self._load_path(job.audio_path, record_history=True)
+        except (OSError, TypeError, ValueError) as exc:
+            print(f"[service] unable to reconcile download playback: {exc}")
+
+    def _notification_artwork(self, status: PlaybackStatus):
+        track = self.radio.current if self.radio.active else None
+        key = (
+            (self.radio.generation, self._radio_stream_request_id, track)
+            if track is not None and status is not PlaybackStatus.IDLE else None
+        )
+        source = (track.thumbnail_url or "") if key is not None else None
+        if key != self._notification_artwork_key:
+            self._notification_artwork_key = key
+            self._notification_artwork_bitmap = None
+            if source and source.startswith(("https://", "http://")):
+                def worker():
+                    bitmap = None
+                    try:
+                        bitmap = load_radio_notification_artwork(source)
+                    except Exception as exc:
+                        # Thumbnail failure must not affect audio or reveal URLs.
+                        print(f"[radio] notification artwork unavailable: {type(exc).__name__}")
+                    self._accept_notification_artwork(key, bitmap)
+
+                threading.Thread(
+                    target=worker, name="RadioNotificationArtwork", daemon=True,
+                ).start()
+        cover_path = "" if source and source.startswith(("https://", "http://")) else source
+        return self._notification_artwork_bitmap, cover_path
+
+    @playback_locked
+    def _accept_notification_artwork(self, key, bitmap):
+        if (
+            key != self._notification_artwork_key
+            or not self.radio.active
+            or self.status is PlaybackStatus.IDLE
+            or key != (self.radio.generation, self._radio_stream_request_id, self.radio.current)
+        ):
+            return
+        self._notification_artwork_bitmap = bitmap
+        self._sync_android_system_state(self.status)
+
+    @playback_locked
     def _sync_android_system_state(self, status: PlaybackStatus):
         if utils.get_platform() != "android":
             return
+        artwork_bitmap, cover_path = self._notification_artwork(status)
         position = safe_sound_position(Gui_sounds.sound)
         if status is PlaybackStatus.PAUSED and Gui_sounds.song_local:
             with contextlib.suppress(TypeError, ValueError, IndexError):
@@ -864,6 +1163,8 @@ class Gui_sounds:
                     _SESSION,
                     Gui_sounds.file_to_load,
                     Gui_sounds.length,
+                    artwork_bitmap=artwork_bitmap,
+                    cover_path=cover_path,
                 )
             except Exception as exc:
                 print(f"[service] media metadata update failed: {exc}")
@@ -1057,7 +1358,7 @@ class Gui_sounds:
             json.dumps(
                 {
                     "active": self.radio.active,
-                    "available": bool(seed),
+                    "available": bool(self.radio.active or seed),
                 },
                 separators=(",", ":"),
             ),
@@ -1137,6 +1438,7 @@ class Gui_sounds:
     def _launch_radio_stream(self, generation: int, track: RadioTrack) -> None:
         self._radio_stream_request_id += 1
         request_id = self._radio_stream_request_id
+        Gui_sounds.file_to_load = f"Radio - {track.title}"
         self._radio_waiting_for_refill = False
         self.stop_next_monitor()
         stop_and_unload(Gui_sounds.sound)
@@ -1249,43 +1551,71 @@ class Gui_sounds:
         if target is not None:
             self._launch_radio_stream(generation, target)
             return
-        seed = self.radio.seed
-        if seed is not None:
+        discovery_seed = self.radio.discovery_seed
+        if discovery_seed is not None:
             self._radio_waiting_for_refill = True
             self._set_status(
                 PlaybackStatus.PAUSED if self._radio_pause_requested else PlaybackStatus.LOADING
             )
             self._publish_radio_snapshot()
-            self._request_radio_refill(
-                generation,
-                RadioTrack(seed.video_id, seed.title, seed.cover_path),
-            )
+            self._request_radio_refill(generation, discovery_seed)
         elif message:
             self.stop_radio(reason=message)
 
     @playback_locked
     def start_radio(self, *val) -> None:
-        if self.radio.active:
-            return
-        seed = self._radio_seed()
-        if seed is None:
-            self.send("data_info", "Radio is available for downloaded YouTube tracks.")
-            self._send_radio_state()
-            return
-        if Gui_sounds.sound is None:
-            self._load_path(seed.path, record_history=False, autoplay=False)
-            if Gui_sounds.sound is None:
+        raw = "".join(
+            bytes(item).decode("utf-8", "ignore")
+            if isinstance(item, (bytes, bytearray)) else str(item)
+            for item in val
+        ).strip()
+        discovery_seed = None
+        if raw:
+            try:
+                request = json.loads(raw)
+                video_id = request["video_id"]
+                title = request["title"]
+                thumbnail = request.get("thumbnail_url")
+                if (not isinstance(video_id, str) or not is_valid_video_id(video_id)
+                        or not isinstance(title, str) or not title.strip()
+                        or (thumbnail is not None and not isinstance(thumbnail, str))):
+                    return
+                discovery_seed = RadioTrack(
+                    video_id.strip(), title.strip(), (thumbnail or "").strip() or None,
+                )
+            except (KeyError, TypeError, ValueError):
                 return
-        generation = self.radio.start(seed)
-        # The seed is the first track in the listening history. Keeping its
-        # existing player lets recommendations arrive without interrupting it.
-        self.radio.current = RadioTrack(seed.video_id, seed.title, seed.cover_path)
+        elif self.radio.active:
+            return
+
+        seed = self._radio_seed()
+        if discovery_seed is not None or seed is not None:
+            cancel = getattr(self, "_cancel_download_playback", None)
+            if cancel is not None:
+                cancel(command_context=getattr(self, "_dispatch_playback_command", None))
+        if discovery_seed is None:
+            if seed is None:
+                self.send("data_info", "Select a song to start Radio.")
+                self._send_radio_state()
+                return
+            if Gui_sounds.sound is None:
+                self._load_path(seed.path, record_history=False, autoplay=False)
+                if Gui_sounds.sound is None:
+                    return
+        generation = self.radio.start(seed, discovery_seed=discovery_seed)
+        self.radio.current = self.radio.discovery_seed
         self._radio_pause_requested = False
         self._radio_waiting_for_refill = False
+        self._radio_refill_generations.clear()
         self._radio_attempts.clear()
         self.set_loop(self.loop_enabled)
         self.local_navigation_enabled = False
-        if self.status is not PlaybackStatus.PLAYING:
+        if discovery_seed is not None:
+            # Resolve the selected search song first. Recommendations run in a
+            # separate worker and cannot replace this seed while it is loading.
+            self._launch_radio_stream(generation, discovery_seed)
+        elif self.status is not PlaybackStatus.PLAYING:
+            # A local seed keeps its existing player and position.
             self.play()
         else:
             self.start_next_monitor()
@@ -1294,29 +1624,31 @@ class Gui_sounds:
         self._send_radio_state()
         self._publish_radio_snapshot()
         self.send("data_info", "Building Radio in the background...")
-        search_title = f"{seed.artist} - {seed.title}" if seed.artist else seed.title
-        self._request_radio_refill(
-            generation,
-            RadioTrack(seed.video_id, search_title, seed.cover_path),
-        )
+        if discovery_seed is None:
+            search_title = f"{seed.artist} - {seed.title}" if seed.artist else seed.title
+            discovery_seed = RadioTrack(seed.video_id, search_title, seed.cover_path)
+        self._request_radio_refill(generation, discovery_seed)
 
     @playback_locked
     def stop_radio(self, *val, reason: str = "Radio stopped.") -> None:
+        was_active = self.radio.active
         seed = self.radio.stop()
+        self._radio_stream_request_id += 1
         self._radio_waiting_for_refill = False
         self._radio_refill_generations.clear()
         self._radio_attempts.clear()
-        if seed is None:
+        if not was_active:
             self._send_radio_state()
             return
         self.stop(notify=False)
         self.local_navigation_enabled = bool(self.queue.items)
-        self._load_path(
-            seed.path,
-            record_history=False,
-            autoplay=False,
-            initial_position=seed.position,
-        )
+        if seed is not None:
+            self._load_path(
+                seed.path,
+                record_history=False,
+                autoplay=False,
+                initial_position=seed.position,
+            )
         self.send("data_info", reason)
         self._send_radio_state()
         self._publish_radio_snapshot()
@@ -1363,6 +1695,39 @@ class Gui_sounds:
         self.getting_song(target, record_history=False)
 
     @playback_locked
+    def select_downloads(self, payload):
+        """Switch to Downloads without restarting an already local track."""
+        try:
+            selection = json.loads(payload)
+            directory = selection["directory"]
+            playlist = selection["playlist"]
+            if (not isinstance(directory, str) or not directory
+                    or not isinstance(playlist, list)
+                    or not all(isinstance(item, str) and item
+                               and item not in {".", ".."}
+                               and "/" not in item and "\\" not in item
+                               for item in playlist)):
+                return
+        except (KeyError, TypeError, ValueError):
+            return
+
+        cancel = getattr(self, "_cancel_download_playback", None)
+        if cancel is not None:
+            cancel(command_context=getattr(self, "_dispatch_playback_command", None))
+        Gui_sounds.set_local_download = directory
+        Gui_sounds.load_from_service = False
+        Gui_sounds.playlist = list(playlist)
+        self.queue.set_items(Gui_sounds.playlist)
+        if self.radio.active:
+            # Restore the local seed paused, invalidating pending Radio work.
+            self.stop_radio(reason="Downloads selected.")
+        current = os.path.basename(Gui_sounds.file_to_load or "")
+        if current:
+            self.queue.select(current, record_history=False)
+        self.local_navigation_enabled = bool(self.queue.items)
+        self._sync_android_system_state(self.status)
+
+    @playback_locked
     def load_selection(self, payload):
         """Apply a local selection atomically, even when prior OSCs were lost."""
         try:
@@ -1377,6 +1742,9 @@ class Gui_sounds:
                 return
         except (KeyError, TypeError, ValueError):
             return
+        cancel = getattr(self, "_cancel_download_playback", None)
+        if cancel is not None:
+            cancel(command_context=getattr(self, "_dispatch_playback_command", None))
         Gui_sounds.set_local_download = directory
         Gui_sounds.load_from_service = False
         self.play_list(playlist)
@@ -1770,11 +2138,15 @@ class Gui_sounds:
             self.send("data_info", message)
             self.send("file_is_downloaded", "nope")
 
+    @playback_locked
     def update_load_fs(self, *val):
         Gui_sounds.load_from_service = False
 
     @playback_locked
     def play(self, *val):
+        if getattr(self, "_pending_download_playback", None) is not None:
+            self._set_status(PlaybackStatus.LOADING)
+            return
         if self.radio.active:
             self._radio_pause_requested = False
         sound = Gui_sounds.sound
@@ -1970,7 +2342,8 @@ class Gui_sounds:
     @playback_locked
     def toggle(self, *val):
         if self.status is PlaybackStatus.PLAYING or (
-            self.radio.active and self.status is PlaybackStatus.LOADING
+            (self.radio.active or getattr(self, "_pending_download_playback", None) is not None)
+            and self.status is PlaybackStatus.LOADING
         ):
             self.pause()
         else:
@@ -2135,6 +2508,8 @@ class Gui_sounds:
             PlaybackStatus.LOADING,
         }
         radio_track = self.radio.current if self.radio.active else None
+        if radio_track is None and self.radio.active:
+            radio_track = getattr(self.radio, "discovery_seed", None)
         radio_seed = self.radio.seed if self.radio.active else None
         track_name = radio_track.title if radio_track is not None else (
             radio_seed.title if radio_seed is not None else (
@@ -2171,13 +2546,18 @@ class Gui_sounds:
             status=self.status,
             track_name=track_name,
             cover_path=cover_path,
+            video_id=(
+                radio_track.video_id if radio_track is not None else (
+                    radio_seed.video_id if radio_seed is not None else None
+                )
+            ),
             duration=Gui_sounds.length or 0.0,
             position=position,
             repeat_enabled=self.loop_enabled,
             shuffle_enabled=self.queue.shuffle_enabled,
             queue_size=queue_size,
             playback_mode="radio" if self.radio.active else "local",
-            radio_available=bool(self._radio_seed()),
+            radio_available=bool(self.radio.active or self._radio_seed()),
             service_id=self._service_id,
             revision=self._snapshot_revision,
             command_id=self._command_id,
@@ -2284,6 +2664,8 @@ if __name__ == "__main__":
             GS._sync_android_system_state(GS.status)
         else:
             print("[service] no service ctx; cannot start foreground")
+    if utils.get_platform() == "android" and android_app_task_present() is not False:
+        GS.reconcile_download_playback()
     missing_task_checks = 0
     while True:
         _time.sleep(2)
@@ -2294,6 +2676,8 @@ if __name__ == "__main__":
         task_present = android_app_task_present()
         missing_task_checks = missing_task_checks + 1 if task_present is False else 0
         if missing_task_checks < 2:
+            if task_present is not False:
+                GS.reconcile_download_playback()
             continue
         print("[service] app task removed; stopping playback service")
         GS.stop()
