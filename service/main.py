@@ -865,6 +865,11 @@ class Gui_sounds:
             sequence = command["sequence"]
             name = command["command"]
             value = command.get("value", "")
+            deleted_paths = command.get("deleted_paths", [])
+            if (not isinstance(deleted_paths, list)
+                    or any(not isinstance(path, str) or not path or not os.path.isabs(path)
+                           for path in deleted_paths)):
+                return
             if not isinstance(client_id, str) or not client_id:
                 return
             if (type(sequence) is not int or sequence < 1
@@ -885,6 +890,8 @@ class Gui_sounds:
             handler = self.select_downloads
         elif name == "play_download":
             handler = self.play_download
+        elif name == "remove_deleted_track":
+            handler = self.remove_deleted_track
         else:
             handler = routes.get(name)
         if handler is None:
@@ -904,6 +911,10 @@ class Gui_sounds:
         previous_context = getattr(self, "_dispatch_playback_command", None)
         self._dispatch_playback_command = (client_id, sequence)
         try:
+            # Carry cumulative removals on later commands so a lost or reordered
+            # deletion cannot leave a missing file in the adopted playback queue.
+            for path in deleted_paths:
+                self.remove_deleted_track(path)
             if name in {
                 "load", "stop_radio", "stop", "pause", "next", "previous",
                 "seek_seconds", "navigation_mode",
@@ -915,6 +926,37 @@ class Gui_sounds:
         finally:
             self._dispatch_playback_command = previous_context
             self._publish_playback_snapshot()
+
+    @playback_locked
+    def remove_deleted_track(self, path: str) -> None:
+        """Prune a deleted local file without changing current playback."""
+        if not isinstance(path, str) or not path or not os.path.isabs(path):
+            return
+
+        def canonical(value):
+            if not os.path.isabs(value):
+                value = os.path.join(Gui_sounds.set_local_download, value)
+            return os.path.normcase(os.path.realpath(value))
+
+        try:
+            if os.path.exists(path):
+                return
+            target = canonical(path)
+            current = self.queue.current
+            loaded = Gui_sounds.file_to_load
+            if ((current and canonical(current) == target)
+                    or (loaded and os.path.isabs(loaded) and canonical(loaded) == target)):
+                # An open player can outlive a file removed outside the app.
+                # Retain its queue anchor until playback changes naturally.
+                return
+            remaining = [item for item in self.queue.items if canonical(item) != target]
+        except (OSError, TypeError, ValueError):
+            return
+        if remaining == self.queue.items:
+            return
+        self.queue.set_items(remaining)
+        Gui_sounds.playlist = list(self.queue.items)
+        self._sync_android_system_state(self.status)
 
     @playback_locked
     def _cancel_download_playback(self, *, command_context=None):
@@ -1093,7 +1135,12 @@ class Gui_sounds:
             # may reconcile this same completed request, but cannot restart it.
             Gui_sounds.set_local_download = job.download_dir
             Gui_sounds.load_from_service = False
-            Gui_sounds.playlist = list(pending["playlist"])
+            # Keep the captured selection, excluding audio removed while the
+            # download was pending. Check at handoff so recreated files survive.
+            Gui_sounds.playlist = [
+                name for name in pending["playlist"]
+                if os.path.isfile(os.path.join(job.download_dir, name))
+            ]
             self.queue.set_items(Gui_sounds.playlist)
             self._load_path(job.audio_path, record_history=True)
         except (OSError, TypeError, ValueError) as exc:

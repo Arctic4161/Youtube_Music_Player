@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "Youtube Music Player"
-#define MyAppVersion "2.0.3"
+#define MyAppVersion "2.0.4"
 #define MyAppPublisher "Arctic4161"
 #define MyAppURL "https://github.com/Arctic4161/Youtube_Music_Player"
 #define MyAppExeName "Youtube Music Player.exe"
@@ -31,7 +31,7 @@ DisableProgramGroupPage=yes
 ; Remove the following line to run in administrative install mode (install for all users.)
 PrivilegesRequired=lowest
 OutputDir=dist
-OutputBaseFilename=Youtube Music Player Installer v2.0.3
+OutputBaseFilename=Youtube Music Player Installer v2.0.4
 SetupIconFile=C:\ffmpeg\Youtube_Music_Player\music.ico
 Compression=lzma
 SolidCompression=yes

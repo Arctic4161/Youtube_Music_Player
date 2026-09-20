@@ -2,8 +2,8 @@
 title = Youtube Music Player
 package.name = youtubemusicplayer
 package.domain = com.youtubemusicplayer
-version = 2.0.3
-android.numeric_version = 20003
+version = 2.0.4
+android.numeric_version = 20004
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json
 

@@ -426,6 +426,40 @@ class PlaylistManager:
             p.tracks.pop(index)
             self.save()
 
+    def remove_file_references(self, path: str) -> int:
+        """Remove a deleted audio file from every playlist, saving once."""
+        if not path:
+            return 0
+        root = get_app_writable_dir("Downloaded/Played")
+
+        def normalized_path(value: str) -> str:
+            if not os.path.isabs(value):
+                value = os.path.join(root, value)
+            return os.path.normcase(os.path.abspath(value))
+
+        target = normalized_path(path)
+        changes = []
+        removed = 0
+        for playlist in self.data["playlists"]:
+            remaining = [
+                track for track in playlist.tracks
+                if not track.path or normalized_path(track.path) != target
+            ]
+            if len(remaining) != len(playlist.tracks):
+                changes.append((playlist, playlist.tracks, remaining))
+                removed += len(playlist.tracks) - len(remaining)
+        if not changes:
+            return 0
+        for playlist, _original, remaining in changes:
+            playlist.tracks = remaining
+        try:
+            self.save()
+        except Exception:
+            for playlist, original, _remaining in changes:
+                playlist.tracks = original
+            raise
+        return removed
+
     def move_track(self, pid: str, from_idx: int, to_idx: int) -> None:
         p = self._find(pid)
         if not p:

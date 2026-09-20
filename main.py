@@ -194,52 +194,73 @@ class LibraryTab(MDBottomNavigationItem):
 class RecycleViewRow(BoxLayout):
     text = StringProperty()
     filename = StringProperty()
+    is_playlist_track = BooleanProperty(False)
+
+    def play(self):
+        root = MDApp.get_running_app().root
+        root.getting_song(message=self.filename or self.text + ".m4a")
+        root.change_screen_item("Screen 1")
+
+    def open_actions(self):
+        MDApp.get_running_app().root.message_box(
+            message=self.filename or self.text + ".m4a"
+        )
 
 
-class PlaylistTrackRow(MDBoxLayout):
-    text = StringProperty("")
+class PlaylistTrackRow(RecycleViewRow):
+    is_playlist_track = BooleanProperty(True)
     index = NumericProperty(-1)
     playlist_id = StringProperty("")
 
+    def play(self):
+        MDApp.get_running_app().root._playlist_play_index(
+            int(self.index), self.playlist_id
+        )
+
+    def open_actions(self):
+        MDApp.get_running_app().root._playlist_remove_track(int(self.index))
+
     def on_touch_down(self, touch):
-        if "button" in touch.profile and touch.button != "left":
-            return super().on_touch_down(touch)
         if getattr(touch, "is_mouse_scrolling", False) or touch.ud.get("was_scroll"):
-            with contextlib.suppress(Exception):
-                touch.ud["was_scroll"] = True
+            touch.ud["was_scroll"] = True
             return super().on_touch_down(touch)
+        if "button" in touch.profile and touch.button != "left":
+            return False
         if not self.collide_point(*touch.pos):
             return super().on_touch_down(touch)
-        d = self.ids.get("delete_btn", None)
-        if d and d.collide_point(*touch.pos):
-            self._touch_started_on_child = True
-            self._touch_started_on_delete = True
-            return True
+        action = self.ids.get("action_btn")
+        # Keep ownership on the gesture, since recycled rows and simultaneous
+        # touches must not inherit another tap's pending action.
+        touch.ud[("playlist_row", id(self))] = (
+            bool(action and action.collide_point(*touch.pos)),
+            (self.playlist_id, self.index, self.filename),
+        )
         return True
 
     def on_touch_up(self, touch):
         if getattr(touch, "is_mouse_scrolling", False) or touch.ud.get("was_scroll"):
-            with contextlib.suppress(Exception):
-                touch.ud["was_scroll"] = True
+            touch.ud.pop(("playlist_row", id(self)), None)
+            touch.ud["was_scroll"] = True
             return super().on_touch_up(touch)
-        if getattr(self, "_touch_started_on_delete", False):
-            self._touch_started_on_delete = False
-            d = self.ids.get("delete_btn", None)
-            if d and d.collide_point(*touch.pos):
-                with contextlib.suppress(Exception):
-                    MDApp.get_running_app().root._playlist_remove_track(int(self.index))
-                return True
+        started = touch.ud.pop(("playlist_row", id(self)), None)
+        if "button" in touch.profile and touch.button != "left":
+            return False
+        if started is None:
+            return False
+        on_delete, identity = started
+        if identity != (self.playlist_id, self.index, self.filename):
             return True
-
-        if self.collide_point(*touch.pos):
+        if not self.collide_point(*touch.pos):
+            return True
+        action = self.ids.get("action_btn")
+        released_on_delete = bool(action and action.collide_point(*touch.pos))
+        if on_delete == released_on_delete:
             with contextlib.suppress(Exception):
-                MDApp.get_running_app().root._playlist_play_index(
-                    int(self.index),
-                    self.playlist_id,
-                )
-            return True
-
-        return super().on_touch_up(touch)
+                if on_delete:
+                    self.open_actions()
+                else:
+                    self.play()
+        return True
 
 
 class MySlider(MDSlider):
@@ -360,6 +381,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             return False
         with contextlib.suppress(Exception):
             pending = getattr(GUILayout, "_pending_playback_command", None)
+            if pending is None and getattr(GUILayout, "_pending_deleted_tracks", None):
+                # A playback retry may expire, but confirmed file deletions
+                # still need reconciliation after the service reconnects.
+                GUILayout.send("remove_deleted_track", next(iter(GUILayout._pending_deleted_tracks)))
+                pending = GUILayout._pending_playback_command
             if pending is not None:
                 GUILayout.client.send_message("/command", [pending])
             GUILayout.send("iamawake", json.dumps({"request_id": request_id}))
@@ -609,6 +635,15 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self._snapshot_revision = snapshot.revision
         elif known_service or getattr(GUILayout, "_playback_command_id", ""):
             return
+        acknowledged_client, separator, acknowledged_sequence = snapshot.command_id.rpartition(":")
+        if (separator and acknowledged_client == getattr(GUILayout, "_command_client_id", None)
+                and acknowledged_sequence.isdecimal()):
+            acknowledged_sequence = int(acknowledged_sequence)
+            GUILayout._pending_deleted_tracks = {
+                path: sequence
+                for path, sequence in getattr(GUILayout, "_pending_deleted_tracks", {}).items()
+                if sequence > acknowledged_sequence
+            }
         GUILayout._pending_playback_command = None
         cancel_event(getattr(GUILayout, "_command_retry_event", None))
         GUILayout._command_retry_event = None
@@ -616,6 +651,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if utils.get_platform() == "android":
             GUILayout.service_started = True
         self._apply_playback_snapshot(snapshot)
+        if getattr(GUILayout, "_pending_deleted_tracks", None):
+            # A restarted service can answer the reconnect before receiving
+            # our removals. Keep them pending until that service acknowledges.
+            GUILayout.send("remove_deleted_track", next(iter(GUILayout._pending_deleted_tracks)))
 
     def _search_radio_seed(self):
         """Return the currently displayed search song, never stale playback metadata."""
@@ -914,15 +953,23 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         commands = {
             "load", "load_selection", "select_downloads", "play", "pause", "stop", "next", "previous", "start_radio",
             "stop_radio", "playlist", "navigation_mode", "loop", "shuffle",
-            "seek_seconds", "update_load_fs", "play_download",
+            "seek_seconds", "update_load_fs", "play_download", "remove_deleted_track",
         }
         if message_type in commands:
             client_id = GUILayout._command_client_id
             sequence = GUILayout._command_sequence + 1
-            payload = json.dumps({
+            deleted = dict(getattr(GUILayout, "_pending_deleted_tracks", {}))
+            if message_type == "remove_deleted_track" and os.path.isabs(message):
+                deleted[os.path.abspath(message)] = sequence
+            command = {
                 "client_id": client_id, "sequence": sequence,
                 "command": message_type, "value": message,
-            })
+            }
+            if deleted:
+                # The latest command is the one retried. Include every removal
+                # it supersedes so reordered or lost packets cannot drop one.
+                command["deleted_paths"] = list(deleted)
+            payload = json.dumps(command)
             if message_type == "play_download":
                 # Register before either OSC delivery or download startup. The
                 # music service can recover this intent while the GUI is paused.
@@ -930,6 +977,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 download_state.arm_playback(
                     get_app_writable_dir("Downloaded"), request_id, payload,
                 )
+            GUILayout._pending_deleted_tracks = deleted
             GUILayout._command_sequence = sequence
             GUILayout._playback_command_id = f"{client_id}:{sequence}"
             GUILayout._pending_playback_command = payload
@@ -1066,26 +1114,17 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             )
 
     def select_all_downloads(self):
-        """Select the Downloads queue without starting or restarting a song."""
-        songs = list(dict.fromkeys(self.get_play_list()))
+        """Browse Downloads without changing playback or its current queue."""
         self._playlist_manager.clear_active()
-        self._select_playback()
         self.screen2_is_downloads = True
         self.refresh_playlist()
         self._refresh_downloads_view()
-        # Carry the entire switch in one retryable command. Radio shutdown and
-        # local queue adoption must not depend on earlier OSC messages arriving.
-        GUILayout.send("select_downloads", json.dumps({
-            "directory": self.set_local_download,
-            "playlist": songs,
-        }))
 
     def _playlist_on_select(self, pid: str):
-        self._detach_download_playback()
+        """Browse a playlist; its queue is adopted only when a track is played."""
         self.screen2_is_downloads = False
         self._playlist_manager.set_active(pid)
         self.refresh_playlist()
-        self._send_active_playlist_to_service()
         self.second_screen2()
 
     def refresh_playlist(self):
@@ -1136,7 +1175,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         dlg.open()
 
     def _playlist_create(self, name: str):
-        self._detach_download_playback()
         name = (name or "").strip() or "Untitled"
         pid = self._playlist_manager.create_playlist(name)
         self._playlist_manager.set_active(pid)
@@ -1144,7 +1182,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self._playlist_refresh_tracks()
         with contextlib.suppress(Exception):
             toast(f'Created "{name}"')
-        self.set_active_playlist_send_to_service()
+        self._update_active_playlist_badge()
+        self.second_screen2()
 
     def _playlist_rename(self, pid: str, new_name: str):
         self._playlist_manager.rename_playlist(
@@ -1163,8 +1202,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             was_active = bool(ap and getattr(ap, "id", None) == pid)
         except Exception:
             was_active = False
-        if was_active:
-            self._detach_download_playback()
         self._playlist_manager.delete_playlist(pid)
         self._playlist_refresh_sidebar()
         if was_active:
@@ -1177,12 +1214,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         with contextlib.suppress(Exception):
             toast("Deleted")
         self._update_active_playlist_badge()
-        self._send_active_playlist_to_service()
-
-    def set_active_playlist_send_to_service(self):
-        self._update_active_playlist_badge()
-        self._send_active_playlist_to_service()
-        self.second_screen2()
 
     def _playlist_refresh_tracks(self):
         if not getattr(self, "library_tab", None):
@@ -1209,6 +1240,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         rows = [
             {
                 "text": display_title_from_stem(t.title),
+                "filename": os.path.basename(t.path),
                 "index": idx,
                 "playlist_id": ap.id,
             }
@@ -1369,8 +1401,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         with contextlib.suppress(Exception):
             self._playlist_refresh_tracks()
         with contextlib.suppress(Exception):
-            self._send_active_playlist_to_service()
-        with contextlib.suppress(Exception):
             self.second_screen2()
 
         with contextlib.suppress(Exception):
@@ -1390,7 +1420,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self._playlist_refresh_tracks()
         with contextlib.suppress(Exception):
             toast("Removed")
-        self._send_active_playlist_to_service()
         self.second_screen2()
 
     def _playlist_move_up(self, index: int):
@@ -1406,7 +1435,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             apm.move_track(ap.id, index, to_idx)
             with contextlib.suppress(Exception):
                 self._playlist_refresh_tracks()
-                self._send_active_playlist_to_service()
             self.second_screen2()
 
     def _playlist_move_down(self, index: int):
@@ -1422,7 +1450,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             apm.move_track(ap.id, index, to_idx)
             with contextlib.suppress(Exception):
                 self._playlist_refresh_tracks()
-                self._send_active_playlist_to_service()
             self.second_screen2()
 
     def _playlist_play_index(self, index: int, playlist_id: str = ""):
@@ -1475,6 +1502,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self._radio_save_snapshot = None
         GUILayout._command_client_id = uuid.uuid4().hex
         GUILayout._command_sequence = 0
+        GUILayout._pending_deleted_tracks = {}
         GUILayout._playback_command_id = ""
         GUILayout._pending_playback_command = None
         GUILayout._command_retry_event = None
@@ -1565,13 +1593,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.ids.play_list.text = "Current Playlist: Downloaded"
 
     def second_screen(self, *, clear_active: bool = True):
+        """Refresh the Downloads view without publishing a playback queue."""
         if clear_active:
             self._playlist_manager.clear_active()
         self.screen2_is_downloads = True
         self._refresh_downloads_view()
         with contextlib.suppress(Exception):
             self._update_active_playlist_badge()
-            self._send_active_playlist_to_service()
 
     def change_screen_item(self, nav_item):
         if not getattr(self, "screen2_is_downloads", False):
@@ -1637,7 +1665,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def remove_track(self, message):
         """
-        Delete media/cover on disk and remove the item from the active playlist.
+        Delete media/cover on disk and remove references from every playlist.
         Works whether `message` is a filename string (Page 2) or a dict with
         'path' / 'cover_path' (Page 3).
 
@@ -1672,29 +1700,20 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                     toast("Can't delete the current track. Stop playback first.")
                 return
 
-            for p in (track_path, cover_path):
-                if p and os.path.exists(p):
-                    with contextlib.suppress(Exception):
-                        os.remove(p)
+            try:
+                os.remove(track_path)
+            except FileNotFoundError:
+                pass
+            if cover_path:
+                with contextlib.suppress(OSError):
+                    os.remove(cover_path)
 
+            # Prune only this missing file from playback, regardless of which
+            # playlist is currently being browsed.
+            GUILayout.send("remove_deleted_track", os.path.abspath(track_path))
             pm = getattr(self, "_playlist_manager", None)
-            ap = pm.active_playlist() if pm else None
-            if ap:
-                target = os.path.normpath(os.path.realpath(track_path))
-                remove_index = None
-                for idx, t in enumerate(list(ap.tracks) if ap.tracks else []):
-                    p = getattr(t, "path", None) or (
-                        t.get("path") if isinstance(t, dict) else None
-                    )
-                    if not p:
-                        continue
-                    rp = os.path.normpath(os.path.realpath(p))
-                    if rp == target or os.path.basename(rp) == os.path.basename(target):
-                        remove_index = idx
-                        break
-                if remove_index is not None:
-                    with contextlib.suppress(Exception):
-                        pm.remove_track(ap.id, remove_index)
+            if pm:
+                pm.remove_file_references(track_path)
 
             with contextlib.suppress(Exception):
                 self._playlist_refresh_tracks()
@@ -1708,9 +1727,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             if dlg := getattr(self, "dialog", None):
                 with contextlib.suppress(Exception):
                     dlg.dismiss()
-            with contextlib.suppress(Exception):
-                self._send_active_playlist_to_service()
-            toast("Track deleted and removed from playlist.")
+            toast("Track deleted and removed from playlists.")
         except Exception as e:
             print("Error in remove_track:", e)
             toast("Delete failed.")
@@ -1982,10 +1999,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             toast("The Library is not ready yet.")
             return
         playlist = manager.active_playlist()
-        if playlist is not None:
-            self._save_radio_to_playlist(snapshot, playlist.id)
-        else:
-            self._choose_radio_playlist(snapshot)
+        self._save_radio_to_playlist(snapshot, playlist.id if playlist else None)
 
     def _choose_radio_playlist(self, snapshot):
         # Capture the tapped song while the user chooses; Radio may advance.
@@ -2052,6 +2066,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         dialog.open()
 
     def _save_radio_to_playlist(self, snapshot, playlist_id):
+        """Save to the captured playlist, or only to Downloads when it is None."""
         if not snapshot.video_id or not snapshot.track_name:
             return False
         if self.download_tracker.active_id is not None:
@@ -2061,9 +2076,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         playlist = next(
             (item for item in manager.list_playlists() if item.id == playlist_id), None
         ) if manager is not None else None
-        if playlist is None:
+        if playlist_id is not None and playlist is None:
             toast("That playlist is no longer available. Choose another playlist.")
             return False
+        destination = f'"{playlist.name}"' if playlist else "Downloads"
         try:
             existing = snapshot.audio_path
             if not existing or not os.path.isfile(existing):
@@ -2072,12 +2088,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                     allow_legacy_title=False,
                 )
             if existing:
-                before = copy.deepcopy(manager.data)
-                try:
-                    manager.add_tracks(playlist.id, [existing], video_id=snapshot.video_id)
-                except Exception:
-                    manager.data = before
-                    raise
+                if playlist is not None:
+                    before = copy.deepcopy(manager.data)
+                    try:
+                        manager.add_tracks(playlist.id, [existing], video_id=snapshot.video_id)
+                    except Exception:
+                        manager.data = before
+                        raise
                 was_downloads = getattr(self, "screen2_is_downloads", False)
                 with contextlib.suppress(Exception):
                     self.refresh_playlist()
@@ -2085,7 +2102,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 if was_downloads:
                     with contextlib.suppress(Exception):
                         self._refresh_downloads_view()
-                toast(f'Saved to "{playlist.name}".')
+                toast(f"Saved to {destination}.")
                 return True
             audio_path = download_audio_path(
                 self.set_local_download, snapshot.track_name, snapshot.video_id,
@@ -2102,12 +2119,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             title=snapshot.track_name, video_id=snapshot.video_id,
             thumbnail_url=cover if cover.startswith(("https://", "http://")) else "",
             download_dir=self.set_local_download, audio_path=audio_path,
-            playlist_id=playlist.id,
+            playlist_id=playlist.id if playlist else None,
         )
         self._download_autoplay_id = None
         self.download_tracker.begin(request_id, now=time.monotonic())
         self.radio_save_busy = True
-        toast(f'Downloading to "{playlist.name}"...')
+        toast(f"Downloading to {destination}...")
         self.download_yt(request_id)
         if self.download_tracker.accepts(request_id):
             self.loadingfiletimer = replace_event(
@@ -2126,15 +2143,15 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             playlist_id=playlist.id if playlist else None,
         )
         self._download_autoplay_id = request_id
+        # Capture the queue at Play on every platform. Browsing can change the
+        # visible playlist while this download is still completing.
+        songs = ([os.path.basename(track.path) for track in playlist.tracks if track.path]
+                 if playlist else self.get_play_list())
+        filename = os.path.basename(self.filetoplay)
+        self._download_playback_playlist = tuple(dict.fromkeys(
+            [*songs, filename] if playlist else [filename, *songs]
+        ))
         if utils.get_platform() == "android":
-            # Capture the queue at Play, before callbacks or browsing can change
-            # the selected playlist. The GUI still owns saved-playlist writes.
-            songs = ([os.path.basename(track.path) for track in playlist.tracks if track.path]
-                     if playlist else self.get_play_list())
-            filename = os.path.basename(self.filetoplay)
-            self._download_playback_playlist = tuple(dict.fromkeys(
-                [*songs, filename] if playlist else [filename, *songs]
-            ))
             self._start_music_service_user_initiated()
         self.download_tracker.begin(request_id, now=time.monotonic())
         self.radio_save_busy = True
@@ -2368,6 +2385,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             tracked and self._download_autoplay_id == job.request_id
             and not self._download_service_owns_playback(job)
         )
+        playback_playlist = getattr(self, "_download_playback_playlist", None)
         manager = getattr(self, "_playlist_manager", None)
         if job.playlist_id:
             if manager is None:
@@ -2402,10 +2420,20 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         self.selected_video_id = job.video_id
         self.settitle = job.title
         self.setytlink = job.url
-        self._send_active_playlist_to_service()
         self._browsing_search = False
         self.playlist_mode = True
-        self.play_it()
+        if playback_playlist is None:
+            # Legacy jobs may predate queue capture.
+            self._send_active_playlist_to_service()
+            self.play_it()
+        else:
+            # Keep the queue captured at Play, excluding files deleted while
+            # the download was running. Browsing does not choose its survivors.
+            playback_playlist = tuple(
+                name for name in playback_playlist
+                if os.path.isfile(os.path.join(job.download_dir, name))
+            )
+            self.play_it(playlist=playback_playlist)
 
     def _check_download_timeout(self, dt):
         if self.download_tracker.active_id is None:
@@ -2504,19 +2532,22 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         with contextlib.suppress(Exception):
             self._send_active_playlist_to_service()
 
-    def play_it(self):
+    def play_it(self, *, playlist=None):
         self.stream = self.filetoplay
         MDApp.get_running_app().root.ids.info.text = ""
-        self.playing()
+        if playlist is None:
+            self.playing()
+        else:
+            self.playing(playlist=playlist)
         MDApp.get_running_app().root.ids.next_btt.disabled = False
         MDApp.get_running_app().root.ids.previous_btt.disabled = False
 
-    def playing(self):
+    def playing(self, *, playlist=None):
         GUILayout.get_update_slider = replace_event(
             GUILayout.get_update_slider,
             lambda: Clock.schedule_interval(self.wait_update_slider, 1),
         )
-        if not getattr(self, "screen2_is_downloads", False):
+        if playlist is None and not getattr(self, "screen2_is_downloads", False):
             self._send_active_playlist_to_service()
         self.second_screen2()
         MDApp.get_running_app().root.ids.play_btt.disabled = True
@@ -2538,7 +2569,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 self.loadingosctimer,
                 lambda: Clock.schedule_interval(self.waitingforoscload, 1),
             )
-            self.load_file()
+            if playlist is None:
+                self.load_file()
+            else:
+                self.load_file(playlist=playlist)
         else:
             GUILayout.send("play", "play")
 
@@ -2567,10 +2601,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.shuffle_btt.disabled = arg1
         MDApp.get_running_app().root.ids.shuffle_btt.opacity = arg2
 
-    def load_file(self):
+    def load_file(self, *, playlist=None):
         # The service may only receive the final retry during a cold start.
         # Carry the selection's whole queue instead of relying on earlier OSCs.
-        if getattr(self, "screen2_is_downloads", False):
+        if playlist is not None:
+            songs = list(playlist)
+        elif getattr(self, "screen2_is_downloads", False):
             songs = self.get_play_list() or []
         else:
             songs, _ = self._active_playlist_song_names()
@@ -2782,8 +2818,6 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
                 with contextlib.suppress(Exception):
                     self._playlist_refresh_tracks()
-                with contextlib.suppress(Exception):
-                    self._send_active_playlist_to_service()
                 with contextlib.suppress(Exception):
                     self.second_screen2()
 
