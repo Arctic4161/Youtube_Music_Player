@@ -13,6 +13,7 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource;
 import androidx.media3.datasource.HttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
 
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -20,7 +21,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
+import okhttp3.Interceptor;
 import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 
 /**
  * A synchronous-to-Python facade over an ExoPlayer that is always owned by the
@@ -28,6 +32,22 @@ import okhttp3.OkHttpClient;
  * no URL or audio is persisted here.
  */
 public final class RadioMedia3Player {
+    /** Keep the initial progressive request on the CDN's byte-range path.
+     * Media3 omits Range when position is zero and length is unknown. An
+     * unrestricted GET can be throttled while the same URL's range response
+     * arrives promptly. Preserve Media3's explicit ranges for seeks/retries.
+     */
+    static final class InitialRangeInterceptor implements Interceptor {
+        @Override
+        public Response intercept(Chain chain) throws IOException {
+            Request request = chain.request();
+            if ("GET".equals(request.method()) && request.header("Range") == null) {
+                request = request.newBuilder().header("Range", "bytes=0-").build();
+            }
+            return chain.proceed(request);
+        }
+    }
+
     private final Context context;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ExoPlayer player;
@@ -75,6 +95,7 @@ public final class RadioMedia3Player {
         onMainSync(() -> {
             releaseInternal();
             httpClient = new OkHttpClient.Builder()
+                    .addInterceptor(new InitialRangeInterceptor())
                     .proxy(new Proxy(Proxy.Type.HTTP, new InetSocketAddress("127.0.0.1", proxyPort)))
                     .connectTimeout(20, TimeUnit.SECONDS)
                     .readTimeout(20, TimeUnit.SECONDS)

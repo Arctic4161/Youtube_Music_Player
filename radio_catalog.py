@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 
 import yt_dlp
 from yt_dlp.networking import Request
 
 from download_config import build_radio_stream_options, configured_proxy
-from radio_logic import RadioTrack, parse_related_tracks, is_valid_video_id
+from radio_logic import (
+    RadioTrack, is_valid_video_id, parse_music_search_tracks, parse_related_tracks,
+)
 
 
 class RadioCatalogError(RuntimeError):
@@ -27,13 +30,51 @@ class ResolvedRadioStream:
     proxy_url: str = ""
 
 
-def _next_api_key() -> str:
-    try:
-        from youtubesearchpython.core.constants import searchKey
+# YouTube Music's Songs search filter. The parser still checks each item's type:
+# filtered responses can include other shelves or change shape without notice.
+_MUSIC_SONGS_SEARCH_PARAMS = "EgWKAQIIAWoMEA4QChADEAQQCRAF"
 
-        return str(searchKey)
-    except Exception as exc:  # pragma: no cover - package is a declared dependency
-        raise RadioCatalogError("YouTube search support is unavailable.") from exc
+
+def _request_music(
+    endpoint: str,
+    body: Mapping[str, object],
+    *,
+    timeout_seconds: float = 15.0,
+) -> Mapping[str, object]:
+    """Read anonymous Music metadata using Radio's existing SOCKS transport."""
+
+    payload = {
+        **body,
+        "context": {
+            "client": {
+                "clientName": "WEB_REMIX",
+                "clientVersion": "1." + datetime.now(timezone.utc).strftime("%Y%m%d") + ".01.00",
+                "hl": "en",
+                "gl": "US",
+            }
+        },
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+        "Origin": "https://music.youtube.com",
+        "Referer": "https://music.youtube.com/",
+    }
+    try:
+        with yt_dlp.YoutubeDL({
+            "proxy": configured_proxy(), "socket_timeout": timeout_seconds,
+            "cachedir": False, "quiet": True,
+        }) as ydl:
+            with ydl.urlopen(Request(
+                f"https://music.youtube.com/youtubei/v1/{endpoint}?alt=json",
+                data=json.dumps(payload).encode("utf-8"), headers=headers,
+            )) as response:
+                result = json.loads(response.read())
+    except Exception as exc:
+        raise RadioCatalogError("Unable to fetch YouTube Music tracks.") from exc
+    if not isinstance(result, Mapping) or "error" in result:
+        raise RadioCatalogError("YouTube Music returned no usable response.")
+    return result
 
 
 def fetch_related_tracks(
@@ -43,45 +84,24 @@ def fetch_related_tracks(
     limit: int = 20,
     timeout_seconds: float = 15.0,
 ) -> list[RadioTrack]:
-    """Read related videos from YouTube's web client, with no catalog account."""
+    """Read Music radio and admit only identified songs and official videos."""
 
-    payload = {
-        "context": {
-            "client": {
-                "clientName": "MWEB",
-                "clientVersion": "2.20241202.07.00",
-                "hl": "en",
-                "gl": "US",
-            }
+    if not is_valid_video_id(video_id):
+        raise RadioCatalogError("Invalid Radio seed video ID.")
+    video_id = str(video_id).strip()
+    result = _request_music(
+        "next",
+        {
+            "videoId": video_id,
+            "playlistId": "RDAMVM" + video_id,
+            "params": "wAEB",
+            "enablePersistentPlaylistPanel": True,
+            "isAudioOnly": True,
+            "tunerSettingValue": "AUTOMIX_SETTING_NORMAL",
         },
-        "videoId": video_id,
-    }
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Linux; Android 12; Mobile; rv:135.0) "
-            "Gecko/135.0 Firefox/135.0"
-        ),
-        "Origin": "https://m.youtube.com",
-        "Referer": f"https://m.youtube.com/watch?v={video_id}",
-    }
-    try:
-        headers["Content-Type"] = "application/json"
-        with yt_dlp.YoutubeDL({
-            "proxy": configured_proxy(), "socket_timeout": timeout_seconds,
-            "cachedir": False, "quiet": True,
-        }) as ydl:
-            with ydl.urlopen(Request(
-                f"https://www.youtube.com/youtubei/v1/next?key={_next_api_key()}",
-                data=json.dumps(payload).encode("utf-8"), headers=headers,
-            )) as response:
-                result = json.loads(response.read())
-        return parse_related_tracks(
-            result,
-            exclude_ids=exclude_ids,
-            limit=limit,
-        )
-    except Exception as exc:
-        raise RadioCatalogError("Unable to fetch related Radio tracks.") from exc
+        timeout_seconds=timeout_seconds,
+    )
+    return parse_related_tracks(result, exclude_ids=exclude_ids, limit=limit)
 
 
 def search_fallback_tracks(
@@ -90,34 +110,15 @@ def search_fallback_tracks(
     exclude_ids: Iterable[str] = (),
     limit: int = 20,
 ) -> list[RadioTrack]:
-    """Use yt-dlp search so discovery shares its native SOCKS support."""
+    """Keep fallback discovery inside Music with the same strict item filter."""
 
     query = str(title or "").strip()
     if not query:
         return []
-    try:
-        with yt_dlp.YoutubeDL({
-            "proxy": configured_proxy(), "socket_timeout": 15,
-            "extract_flat": True, "skip_download": True, "cachedir": False,
-            "quiet": True, "no_warnings": True,
-        }) as ydl:
-            result = ydl.extract_info(f"ytsearch{max(1, limit)}:{query}", download=False)
-    except Exception as exc:
-        raise RadioCatalogError("Unable to find fallback Radio tracks.") from exc
-    excluded = set(exclude_ids)
-    tracks = []
-    for entry in (result or {}).get("entries") or []:
-        if not isinstance(entry, Mapping):
-            continue
-        video_id = str(entry.get("id") or "")
-        title = str(entry.get("title") or "").strip()
-        if not is_valid_video_id(video_id) or not title or video_id in excluded:
-            continue
-        excluded.add(video_id)
-        tracks.append(RadioTrack(video_id, title, entry.get("thumbnail")))
-        if len(tracks) >= max(1, limit):
-            break
-    return tracks
+    result = _request_music(
+        "search", {"query": query, "params": _MUSIC_SONGS_SEARCH_PARAMS},
+    )
+    return parse_music_search_tracks(result, exclude_ids=exclude_ids, limit=limit)
 
 
 def resolve_radio_stream(video_id: str) -> ResolvedRadioStream:

@@ -62,6 +62,55 @@ def audio_filename(title: str, media_id: str) -> str:
     return f"{media_stem(title, media_id)}.m4a"
 
 
+def _download_artifact_stems(stem: str, names: list[str]):
+    """Include completed audio, resumable parts, and the matching cover."""
+    for name in names:
+        actual_stem, tail = name[:len(stem)], name[len(stem):].casefold()
+        if actual_stem.casefold() == stem.casefold() and (
+            tail in {".m4a", ".jpg"} or tail.startswith(".m4a.")
+        ):
+            yield actual_stem
+
+
+def download_audio_path(directory: str, title: str, media_id: str) -> str:
+    """Choose a stable output without sharing a case-different video's files."""
+    clean_id = stable_media_id("", media_id)
+    suffix = f" [{clean_id}]"
+    stem = media_stem(title, clean_id)
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        names = []
+    normal = list(_download_artifact_stems(stem, names))
+    conflicts = any(not actual.endswith(suffix) for actual in normal)
+    if normal and not conflicts:
+        return os.path.join(directory, f"{stem}.m4a")
+
+    # Only collisions change the usual filename. Keep the exact ID suffix so
+    # existing lookup and Radio metadata continue to recognize either name.
+    marker = "~" + hashlib.sha256(clean_id.encode("utf-8")).hexdigest()[:12]
+    title_limit = max(1, 120 - len(marker) - len(suffix) - 1)
+    alternate = f"{stem[:-len(suffix)][:title_limit].rstrip()} {marker}{suffix}"
+    alternate_artifacts = list(_download_artifact_stems(alternate, names))
+    if conflicts or alternate_artifacts:
+        if any(not actual.endswith(suffix) for actual in alternate_artifacts):
+            raise FileExistsError("Another video owns the alternate download filename.")
+        return os.path.join(directory, f"{alternate}.m4a")
+    return os.path.join(directory, f"{stem}.m4a")
+
+
+def validate_download_audio_path(audio_path: str, media_id: str) -> None:
+    """Reject a replaced/case-conflicting file before reusing or tagging it."""
+    stem, extension = os.path.splitext(os.path.basename(audio_path))
+    suffix = f" [{stable_media_id('', media_id)}]"
+    if extension.casefold() != ".m4a" or not stem.endswith(suffix):
+        raise ValueError("The download filename does not match the selected video.")
+    names = os.listdir(os.path.dirname(audio_path))
+    if any(not actual.endswith(suffix)
+           for actual in _download_artifact_stems(stem, names)):
+        raise FileExistsError("Another video owns this download filename.")
+
+
 def find_existing_audio(directory: str, title: str, media_id: str) -> str | None:
     """Find a downloaded audio file before the caller starts a new download."""
 
@@ -71,10 +120,9 @@ def find_existing_audio(directory: str, title: str, media_id: str) -> str | None
         return None
 
     expected = os.path.join(root, audio_filename(title, clean_id))
-    if os.path.isfile(expected):
-        return expected
-
-    suffix = f"[{stable_media_id('', clean_id)}]".casefold()
+    # Inspect the actual directory entry even for the expected path: Windows
+    # file existence checks ignore case, but YouTube video IDs do not.
+    suffix = f"[{stable_media_id('', clean_id)}]"
     matches: list[str] = []
     try:
         with os.scandir(root) as entries:
@@ -84,7 +132,9 @@ def find_existing_audio(directory: str, title: str, media_id: str) -> str | None
                 _stem, extension = os.path.splitext(entry.name)
                 if extension.casefold() not in _AUDIO_EXTENSIONS:
                     continue
-                if _stem.casefold().endswith(suffix):
+                if _stem.endswith(suffix):
+                    if entry.name.casefold() == os.path.basename(expected).casefold():
+                        return entry.path
                     matches.append(entry.path)
     except OSError:
         pass

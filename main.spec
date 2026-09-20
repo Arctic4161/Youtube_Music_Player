@@ -56,6 +56,7 @@ except Exception:
 #  but listing here is harmless and sometimes helps on edge cases.)
 _extra_sources = [
     ('download_config.py', '.'),
+    ('download_state.py', '.'),
     ('media_identity.py', '.'),
     ('playback_logic.py', '.'),
     ('radio_logic.py', '.'),

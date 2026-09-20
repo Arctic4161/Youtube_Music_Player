@@ -106,6 +106,8 @@ class DownloadJob:
             "video_id": self.video_id,
             "thumbnail_url": self.thumbnail_url,
             "download_dir": self.download_dir,
+            "audio_path": self.audio_path,
+            "playlist_id": self.playlist_id,
         })
 
 

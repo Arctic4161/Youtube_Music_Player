@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import json
 import os
 import sys
@@ -7,8 +8,9 @@ import uuid
 from runpy import run_path
 
 import utils
+import download_state
 from media_identity import (
-    audio_filename,
+    download_audio_path,
     display_title_from_stem,
     find_existing_audio,
     stable_media_id,
@@ -672,7 +674,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             GUILayout.service_playback_status = status.value
 
     @mainthread
-    def _reset_to_startup_gui(self):
+    def _reset_to_startup_gui(self, *, message="", search_generation=None):
+        # This callback may run a frame after the search result was handled.
+        # A newer selection owns the screen by then and must not be cleared.
+        if search_generation is not None and search_generation != self._search_generation:
+            return
         self.gui_reset = True
         self.paused = False
         GUILayout.playing_song = False
@@ -687,7 +693,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
                 os.path.dirname(__file__), "music.png"
             )
         root.ids.song_title.text = ""
-        root.ids.info.text = ""
+        root.ids.info.text = message
         root.ids.song_position.text = ""
         root.ids.song_max.text = ""
         root.ids.song_position.opacity = 0
@@ -817,7 +823,7 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def send(message_type, message):
         message = f"{message}"
         commands = {
-            "load", "play", "pause", "stop", "next", "previous", "start_radio",
+            "load", "load_selection", "play", "pause", "stop", "next", "previous", "start_radio",
             "stop_radio", "playlist", "navigation_mode", "loop", "shuffle",
             "seek_seconds", "update_load_fs",
         }
@@ -1421,10 +1427,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         except Exception:
             return "No active playlist"
 
-    def second_screen(self, *, clear_active: bool = True):
-        if clear_active:
-            self._playlist_manager.clear_active()
-        self.screen2_is_downloads = True
+    def _refresh_downloads_view(self):
+        """Refresh visible Downloads rows without changing the playback queue."""
         songs = self.get_play_list()
         uniq = list(dict.fromkeys(songs))
         self.ids.rv.data = [
@@ -1436,6 +1440,12 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         ]
         with contextlib.suppress(Exception):
             self.ids.play_list.text = "Current Playlist: Downloaded"
+
+    def second_screen(self, *, clear_active: bool = True):
+        if clear_active:
+            self._playlist_manager.clear_active()
+        self.screen2_is_downloads = True
+        self._refresh_downloads_view()
         with contextlib.suppress(Exception):
             self._update_active_playlist_badge()
             self._send_active_playlist_to_service()
@@ -1756,11 +1766,13 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         if error or not results:
             self.results_loaded = False
             self.result1 = []
-            self._reset_to_startup_gui()
-            self.ids.info.text = (
-                "Error searching music. Check your connection and try again."
-                if error
-                else "No matching music was found."
+            self._reset_to_startup_gui(
+                message=(
+                    "Error searching music. Check your connection and try again."
+                    if error
+                    else "No matching music was found."
+                ),
+                search_generation=generation,
             )
             return
         self.result1 = results
@@ -1770,8 +1782,10 @@ class GUILayout(MDFloatLayout, MDGridLayout):
 
     def _show_search_result(self):
         if not self.result1:
-            self._reset_to_startup_gui()
-            self.ids.info.text = "No matching music was found."
+            self._reset_to_startup_gui(
+                message="No matching music was found.",
+                search_generation=self._search_generation,
+            )
             return
         if GUILayout.slider is None:
             GUILayout.slider = MySlider(
@@ -1895,30 +1909,84 @@ class GUILayout(MDFloatLayout, MDGridLayout):
     def download_result(self, *val):
         try:
             payload = json.loads("".join(val))
-            request_id = str(payload.get("request_id") or "")
-            status = str(payload.get("status") or "")
-            message = str(payload.get("message") or "")
-            audio_path = payload.get("audio_path")
-        except (AttributeError, json.JSONDecodeError, TypeError, ValueError):
+        except (TypeError, ValueError):
             return
-        if not self.download_tracker.accepts(request_id):
+        self._accept_download_result(payload)
+
+    def _acknowledge_download_result(self, request_id):
+        if utils.get_platform() == "android":
+            try:
+                download_state.acknowledge_result(get_app_writable_dir("Downloaded"), request_id)
+            except OSError as exc:
+                print(f"[download] unable to acknowledge result: {exc}")
+                return False
+        return True
+
+    def _accept_download_result(self, payload, recovered_job=None):
+        if not isinstance(payload, dict):
             return
-        if status != "success":
-            self._restore_after_download_failure(
-                message or "Download failed. Tap Play to retry."
-            )
-            return
-        job = self._download_job
+        request_id = str(payload.get("request_id") or "")
+        tracked = self.download_tracker.accepts(request_id)
+        job = self._download_job if tracked else recovered_job
         if job is None or job.request_id != request_id:
+            # A late result may belong to a completed job from an older GUI.
+            if utils.get_platform() == "android" and recovered_job is None:
+                self._reconcile_downloads()
             return
-        expected = os.path.normcase(os.path.realpath(job.audio_path))
-        reported = os.path.normcase(os.path.realpath(str(audio_path or "")))
-        if not expected or reported != expected or not os.path.isfile(expected):
-            self._restore_after_download_failure(
-                "Download finished without the expected audio file. Tap Play to retry."
-            )
+        status = payload.get("status")
+        if status not in {"success", "error", "cancelled"}:
             return
-        self._complete_download_success()
+        message = str(payload.get("message") or "Download failed. Tap Play to retry.")
+        if status == "success":
+            expected = os.path.normcase(os.path.realpath(job.audio_path))
+            reported = os.path.normcase(os.path.realpath(str(payload.get("audio_path") or "")))
+            if reported == expected and os.path.isfile(expected):
+                if tracked:
+                    self._complete_download_success()
+                else:
+                    self._complete_download_success(job)
+                return
+            message = "Download finished without the expected audio file. Tap Play to retry."
+        if tracked:
+            self._restore_after_download_failure(message)
+        else:
+            with contextlib.suppress(Exception):
+                toast(message)
+        self._acknowledge_download_result(request_id)
+
+    def _reconcile_downloads(self, *_args):
+        """Consume durable results without starting a foreground service to query them."""
+        cancel_event(getattr(self, "_download_reconcile_event", None))
+        self._download_reconcile_event = None
+        if utils.get_platform() != "android" or getattr(MDApp.get_running_app(), "_gui_backgrounded", False):
+            return
+        state_dir = get_app_writable_dir("Downloaded")
+        # Commit at most one result per frame interval. A backlog or failed save
+        # must not create unbounded disk work inside the resume callback.
+        try:
+            records = download_state.pending_results(state_dir, limit=1)
+        except OSError as exc:
+            print(f"[download] unable to read pending results: {exc}")
+            return
+        for record in records:
+            job = download_state.job_from_request(record["request"])
+            if self.download_tracker.accepts(job.request_id):
+                # A terminal result awaiting local persistence is not a stalled download.
+                self.download_tracker.touch(job.request_id, now=time.monotonic())
+            self._accept_download_result(record["result"], job)
+        if records:
+            self._download_reconcile_event = Clock.schedule_once(self._reconcile_downloads, 1)
+        if self.download_tracker.active_id is None:
+            job = download_state.active_job(state_dir)
+            if job is not None:
+                self._download_job = job
+                self._download_autoplay_id = None
+                self._pending_android_download = None
+                self.download_tracker.begin(job.request_id, now=time.monotonic())
+                self.loadingfiletimer = replace_event(
+                    self.loadingfiletimer,
+                    lambda: Clock.schedule_interval(self._check_download_timeout, 1),
+                )
 
     @mainthread
     def update_info(self, *val):
@@ -1970,24 +2038,42 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         ids.next_btt.disabled = False
         ids.previous_btt.disabled = False
 
-    def _complete_download_success(self):
-        job = self._download_job
-        if job is None or not self.download_tracker.accepts(job.request_id):
+    def _complete_download_success(self, recovered_job=None):
+        job = recovered_job or self._download_job
+        tracked = job is not None and self.download_tracker.accepts(job.request_id)
+        if job is None or (recovered_job is None and not tracked):
             return
         if not os.path.isfile(job.audio_path):
-            self._restore_after_download_failure("Downloaded audio file was not found. Tap Play to retry.")
+            if tracked:
+                self._restore_after_download_failure("Downloaded audio file was not found. Tap Play to retry.")
             return
-        autoplay = self._download_autoplay_id == job.request_id
-        self._cancel_download_wait(notify_service=False)
+        autoplay = tracked and self._download_autoplay_id == job.request_id
         manager = getattr(self, "_playlist_manager", None)
-        if manager and job.playlist_id:
-            with contextlib.suppress(Exception):
+        if job.playlist_id:
+            if manager is None:
+                return  # Wait until Library initialization can commit the destination.
+            before = copy.deepcopy(getattr(manager, "data", None))
+            try:
                 manager.add_tracks(job.playlist_id, [job.audio_path], video_id=job.video_id)
+            except Exception as exc:
+                # add_tracks mutates before saving. Restore memory so replay
+                # retries the write instead of deduplicating an unsaved track.
+                if before is not None:
+                    manager.data = before
+                print(f"[download] unable to save destination playlist: {exc}")
+                return
+        if not self._acknowledge_download_result(job.request_id):
+            return
+        if tracked:
+            self._cancel_download_wait(notify_service=False)
         # Update the library without replacing the service's current queue.
         was_downloads = getattr(self, "screen2_is_downloads", False)
         with contextlib.suppress(Exception):
             self.refresh_playlist()
         self.screen2_is_downloads = was_downloads
+        if was_downloads:
+            with contextlib.suppress(Exception):
+                self._refresh_downloads_view()
         if not autoplay:
             with contextlib.suppress(Exception):
                 toast("Download complete.")
@@ -2006,6 +2092,9 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             return False
         if getattr(MDApp.get_running_app(), "_gui_backgrounded", False):
             return True
+        self._reconcile_downloads()
+        if self.download_tracker.active_id is None:
+            return False
         if not self.download_tracker.expired(now=time.monotonic()):
             pending = self._pending_android_download
             if pending is not None and self.download_tracker.accepts(pending[0]):
@@ -2048,10 +2137,11 @@ class GUILayout(MDFloatLayout, MDGridLayout):
             self.playlist_mode = True
             self.play_it()
             return
-        self.filetoplay = os.path.join(
-            self.set_local_download,
-            audio_filename(title, media_id),
-        )
+        try:
+            self.filetoplay = download_audio_path(self.set_local_download, title, media_id)
+        except OSError as exc:
+            self._restore_after_download_failure(f"Unable to choose a download filename: {exc}")
+            return
         if not getattr(self, "setytlink", None):
             self._restore_after_download_failure(
                 "The selected track is not available to download."
@@ -2158,7 +2248,17 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         MDApp.get_running_app().root.ids.shuffle_btt.opacity = arg2
 
     def load_file(self):
-        GUILayout.send("load", self.stream)
+        # The service may only receive the final retry during a cold start.
+        # Carry the selection's whole queue instead of relying on earlier OSCs.
+        if getattr(self, "screen2_is_downloads", False):
+            songs = self.get_play_list() or []
+        else:
+            songs, _ = self._active_playlist_song_names()
+        GUILayout.send("load_selection", json.dumps({
+            "path": self.stream,
+            "directory": get_app_writable_dir("Downloaded/Played"),
+            "playlist": songs,
+        }))
 
     @mainthread
     def set_slider(self, *val):
@@ -2391,6 +2491,8 @@ class GUILayout(MDFloatLayout, MDGridLayout):
         """Cancel owned callbacks and stop local OSC activity on application exit."""
 
         self._cancel_service_reconnect()
+        cancel_event(getattr(self, "_download_reconcile_event", None))
+        self._download_reconcile_event = None
         cancel_event(GUILayout.get_update_slider)
         GUILayout.get_update_slider = None
         cancel_event(getattr(self, "loadingfiletimer", None))
@@ -2590,6 +2692,7 @@ class Musicapp(MDApp):
 
         self._resume_handshake_event = None
         self._gui_backgrounded = False
+        self.root._reconcile_downloads()
         tracker = getattr(self.root, "download_tracker", None)
         if tracker is not None and tracker.active_id:
             # Time spent with a suspended GUI is not a download failure.

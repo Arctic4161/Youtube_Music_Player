@@ -50,7 +50,8 @@ def build_yt_dlp_options(
         # is supplied. visionos does not require the JS player and still
         # exposes regular M4A audio streams for anonymous downloads.
         "extractor_args": {"youtube": {"player_client": ["visionos"]}},
-        "outtmpl": {"default": audio_path},
+        # This is a literal path, not a user-supplied yt-dlp template.
+        "outtmpl": {"default": audio_path.replace("%", "%%")},
         "overwrites": False,
         # A restarted sticky service must continue yt-dlp's existing .part file.
         "continuedl": True,

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from oscpy.server import OSCThreadServer
 
+import download_state
 from service.main import Gui_sounds
 from service_lifecycle import clear_download_cancellation
 from utils import get_app_writable_dir
@@ -162,7 +163,10 @@ def run_download_service(payload: str | None = None) -> None:
             # download_yt already reported its synchronous launch failure.
             completed = True
     finally:
-        if completed and request_id is not None:
+        if completed and request_id is not None and (
+            download_state.is_acknowledged(get_app_writable_dir("Downloaded"), request_id)
+            or download_state.read_result(get_app_writable_dir("Downloaded"), request_id) is not None
+        ):
             _clear_active_download(request_id)
             with contextlib.suppress(OSError):
                 clear_download_cancellation(get_app_writable_dir("Downloaded"), request_id)

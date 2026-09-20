@@ -7,7 +7,7 @@ android.numeric_version = 20002
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json
 
-source.include_patterns = ./service/main.py, ./service/download_service.py, playlist_manager.py, musicapp.kv, library_tab.kv, utils.py, download_config.py, playback_logic.py, radio_logic.py, radio_catalog.py, radio_player.py, radio_proxy.py, service_lifecycle.py, timer_lifecycle.py, media_identity.py, search_logic.py, youtube_search_compat.py, ui_scaling.py
+source.include_patterns = ./service/main.py, ./service/download_service.py, playlist_manager.py, musicapp.kv, library_tab.kv, utils.py, download_config.py, download_state.py, playback_logic.py, radio_logic.py, radio_catalog.py, radio_player.py, radio_proxy.py, service_lifecycle.py, timer_lifecycle.py, media_identity.py, search_logic.py, youtube_search_compat.py, ui_scaling.py
 
 # Your main script
 entrypoint = main.py
@@ -25,6 +25,10 @@ android.archs = arm64-v8a,armeabi-v7a
 android.release_artifact = apk
 
 android.permissions = INTERNET, FOREGROUND_SERVICE, WAKE_LOCK, POST_NOTIFICATIONS, FOREGROUND_SERVICE_MEDIA_PLAYBACK, FOREGROUND_SERVICE_DATA_SYNC
+
+# SDL/Kivy dialogs currently receive Back through legacy key events. Preserve
+# that route on Android 16 until the bootstrap supports predictive Back.
+android.extra_manifest_application_arguments = android_src/application_attributes.xml
 
 # python-for-android generates ServiceMusicservice and writes this foreground
 # service type into its manifest declaration (required for media playback on

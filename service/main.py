@@ -13,10 +13,12 @@ import yt_dlp
 from yt_dlp import DownloadError
 
 import utils
+import download_state
 from download_config import build_yt_dlp_options
 from media_identity import (
     display_title_from_stem,
-    media_stem,
+    download_audio_path,
+    validate_download_audio_path,
     stable_media_id,
     youtube_video_id,
 )
@@ -810,7 +812,8 @@ class Gui_sounds:
         except (KeyError, TypeError, ValueError):
             return
         routes = {
-            "load": self.load, "play": self.play, "pause": self.pause,
+            "load": self.load, "load_selection": self.load_selection,
+            "play": self.play, "pause": self.pause,
             "stop": self.stop, "next": self.next, "previous": self.previous_bttn,
             "start_radio": self.start_radio, "stop_radio": self.stop_radio,
             "playlist": self.play_list, "navigation_mode": self.set_navigation_mode,
@@ -1360,6 +1363,26 @@ class Gui_sounds:
         self.getting_song(target, record_history=False)
 
     @playback_locked
+    def load_selection(self, payload):
+        """Apply a local selection atomically, even when prior OSCs were lost."""
+        try:
+            selection = json.loads(payload)
+            path = selection["path"]
+            directory = selection["directory"]
+            playlist = selection["playlist"]
+            if (not isinstance(path, str) or not path
+                    or not isinstance(directory, str) or not directory
+                    or not isinstance(playlist, list)
+                    or not all(isinstance(item, str) for item in playlist)):
+                return
+        except (KeyError, TypeError, ValueError):
+            return
+        Gui_sounds.set_local_download = directory
+        Gui_sounds.load_from_service = False
+        self.play_list(playlist)
+        self.load(path)
+
+    @playback_locked
     def load(self, *val):
         """
         Load a track robustly:
@@ -1466,6 +1489,21 @@ class Gui_sounds:
             )
             return
 
+        if utils.get_platform() == "android":
+            state_dir = get_app_writable_dir("Downloaded")
+            if download_state.is_acknowledged(state_dir, request_id):
+                return
+            prior = download_state.read_result(state_dir, request_id)
+            if prior is not None:
+                self.send("download_result", json.dumps(prior["result"]))
+                return
+            try:
+                download_state.remember_request(state_dir, request)
+            except (OSError, ValueError) as exc:
+                self._send_download_result(request_id, status="error",
+                                           message=f"Unable to save download request: {exc}")
+                return
+
         if utils.get_platform() == "android" and download_request_cancelled(
             get_app_writable_dir("Downloaded"), request_id
         ):
@@ -1497,6 +1535,7 @@ class Gui_sounds:
                     video_id,
                     set_local,
                     set_local_download,
+                    str(request.get("audio_path") or "") or None,
                 ),
                 name=f"Download-{generation}",
                 daemon=True,
@@ -1572,11 +1611,8 @@ class Gui_sounds:
         video_id: str,
         thumbnail_url: str,
         set_local_download: str,
+        expected_audio_path: str | None = None,
     ) -> None:
-        stem = media_stem(settitle, video_id)
-        audio_path = os.path.join(set_local_download, f"{stem}.m4a")
-        cover_path = os.path.join(set_local_download, f"{stem}.jpg")
-
         cancellation_dir = (
             get_app_writable_dir("Downloaded") if utils.get_platform() == "android" else None
         )
@@ -1594,6 +1630,14 @@ class Gui_sounds:
 
         try:
             os.makedirs(set_local_download, exist_ok=True)
+            audio_path = download_audio_path(set_local_download, settitle, video_id)
+            if expected_audio_path and (
+                os.path.normcase(os.path.abspath(expected_audio_path))
+                != os.path.normcase(os.path.abspath(audio_path))
+            ):
+                raise DownloadError("The download filename changed. Tap Play to retry.")
+            validate_download_audio_path(audio_path, video_id)
+            cover_path = os.path.splitext(audio_path)[0] + ".jpg"
             ydl_opts = build_yt_dlp_options(
                 audio_path=audio_path,
                 page_url=setytlink,
@@ -1614,6 +1658,9 @@ class Gui_sounds:
                     message="Downloaded audio file was not created.",
                 )
                 return
+            # yt-dlp treats an existing path as success when overwrites=False.
+            # Check its actual casing before metadata can relabel another song.
+            validate_download_audio_path(audio_path, video_id)
 
             img_data = None
             if thumbnail_url:
@@ -1624,6 +1671,7 @@ class Gui_sounds:
                 except Exception as exc:
                     print(f"[service] thumbnail fetch failed: {exc}")
             check_cancelled()
+            validate_download_audio_path(audio_path, video_id)
 
             if img_data:
                 try:
@@ -1708,6 +1756,12 @@ class Gui_sounds:
             }
             if audio_path:
                 payload["audio_path"] = audio_path
+            if utils.get_platform() == "android":
+                try:
+                    download_state.record_result(get_app_writable_dir("Downloaded"), payload)
+                except OSError as exc:
+                    # Keep the service checkpoint for restart/recovery if storage failed.
+                    print(f"[download] unable to persist terminal result: {exc}")
             self.send("download_result", json.dumps(payload))
             return
         if status == "success":

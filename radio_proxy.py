@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from yt_dlp.networking._helper import make_socks_proxy_opts
 from yt_dlp.socks import sockssocket
+from yt_dlp.utils.networking import HTTPHeaderDict, clean_proxies
 
 
 class _TunnelServer(ThreadingHTTPServer):
@@ -30,7 +31,11 @@ class RadioProxy:
         if media.scheme != "https" or not media.hostname or media.port not in (None, 443):
             raise ValueError("Radio requires an HTTPS audio stream.")
         self._host = media.hostname.lower()
-        self._options = make_socks_proxy_opts(proxy_url)
+        # Downloads normalize socks5:// to proxy-side DNS in yt-dlp. Apply
+        # that same normalization before configuring the native-player tunnel.
+        proxies = {"all": proxy_url}
+        clean_proxies(proxies, HTTPHeaderDict())
+        self._options = make_socks_proxy_opts(proxies["all"])
         if not self._options["addr"]:
             raise ValueError("Radio requires a valid SOCKS proxy host.")
         self._closed = threading.Event()

@@ -163,6 +163,7 @@ def _nested(mapping: Mapping[str, object], *keys: str) -> object:
 def _first_thumbnail(node: Mapping[str, object]) -> str | None:
     candidates = (
         _nested(node, "thumbnail", "thumbnails"),
+        _nested(node, "thumbnail", "musicThumbnailRenderer", "thumbnail", "thumbnails"),
         _nested(node, "contentImage", "thumbnailViewModel", "image", "sources"),
         _nested(node, "contentImage", "collectionThumbnailViewModel", "primaryThumbnail", "thumbnailViewModel", "image", "sources"),
     )
@@ -177,52 +178,85 @@ def _first_thumbnail(node: Mapping[str, object]) -> str | None:
     return None
 
 
-def _video_id(node: Mapping[str, object]) -> str | None:
-    candidates = (
-        node.get("videoId"),
-        node.get("contentId"),
-        _nested(node, "navigationEndpoint", "watchEndpoint", "videoId"),
-        _nested(node, "onTap", "innertubeCommand", "watchEndpoint", "videoId"),
-    )
-    for candidate in candidates:
-        value = str(candidate or "").strip()
-        if is_valid_video_id(value):
-            return value
-    return None
+_MUSIC_VIDEO_TYPES = frozenset({"MUSIC_VIDEO_TYPE_ATV", "MUSIC_VIDEO_TYPE_OMV"})
 
 
-def _title(node: Mapping[str, object]) -> str:
-    candidates = (
-        node.get("title"),
-        node.get("headline"),
-        _nested(node, "metadata", "lockupMetadataViewModel", "title"),
-        _nested(node, "content", "title"),
-    )
-    for candidate in candidates:
-        value = _text(candidate)
-        if value:
-            return value
-    return ""
-
-
-def _renderer_nodes(value: object) -> Iterable[Mapping[str, object]]:
-    """Yield current and legacy renderer payloads without assuming one layout."""
+def _music_renderer_nodes(
+    value: object, renderer_name: str,
+) -> Iterable[Mapping[str, object]]:
+    """Read owning music rows, never a wrapper's alternate video counterpart."""
 
     if isinstance(value, Mapping):
-        for key in (
-            "compactVideoRenderer",
-            "videoRenderer",
-            "videoWithContextRenderer",
-            "lockupViewModel",
-        ):
-            renderer = value.get(key)
-            if isinstance(renderer, Mapping):
-                yield renderer
+        wrapper = value.get("playlistPanelVideoWrapperRenderer")
+        if isinstance(wrapper, Mapping):
+            yield from _music_renderer_nodes(wrapper.get("primaryRenderer"), renderer_name)
+            return
+        renderer = value.get(renderer_name)
+        if isinstance(renderer, Mapping):
+            yield renderer
+            return
         for child in value.values():
-            yield from _renderer_nodes(child)
+            yield from _music_renderer_nodes(child, renderer_name)
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         for child in value:
-            yield from _renderer_nodes(child)
+            yield from _music_renderer_nodes(child, renderer_name)
+
+
+def _music_track(node: Mapping[str, object], *, search: bool) -> RadioTrack | None:
+    if (
+        "unplayableText" in node
+        or node.get("isPlayable") is False
+        or node.get("musicItemRendererDisplayPolicy")
+        == "MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT"
+    ):
+        return None
+    if search:
+        endpoint = _nested(
+            node, "overlay", "musicItemThumbnailOverlayRenderer", "content",
+            "musicPlayButtonRenderer", "playNavigationEndpoint", "watchEndpoint",
+        )
+        columns = node.get("flexColumns")
+        if not isinstance(columns, list) or not columns or not isinstance(columns[0], Mapping):
+            return None
+        title = _text(_nested(columns[0], "musicResponsiveListItemFlexColumnRenderer", "text"))
+        row_id = _nested(node, "playlistItemData", "videoId")
+    else:
+        endpoint = _nested(node, "navigationEndpoint", "watchEndpoint")
+        title = _text(node.get("title"))
+        row_id = node.get("videoId")
+        if not is_valid_video_id(row_id):
+            return None
+    if not isinstance(endpoint, Mapping):
+        return None
+    video_type = _nested(
+        endpoint, "watchEndpointMusicSupportedConfigs", "watchEndpointMusicConfig", "musicVideoType",
+    )
+    if not isinstance(video_type, str) or video_type not in _MUSIC_VIDEO_TYPES:
+        return None
+    video_id = str(endpoint.get("videoId") or "").strip()
+    # A menu's related song must not classify a different row as music.
+    if row_id is not None and str(row_id).strip() != video_id:
+        return None
+    if not is_valid_video_id(video_id) or not title:
+        return None
+    return RadioTrack(video_id, title, _first_thumbnail(node))
+
+
+def _parse_music_tracks(
+    payload: object, *, search: bool, exclude_ids: Iterable[str], limit: int,
+) -> list[RadioTrack]:
+    excluded = {str(item).strip() for item in exclude_ids}
+    renderer_name = "musicResponsiveListItemRenderer" if search else "playlistPanelVideoRenderer"
+    tracks: list[RadioTrack] = []
+    for node in _music_renderer_nodes(payload, renderer_name):
+        track = _music_track(node, search=search)
+        if track is None or track.video_id in excluded:
+            continue
+        excluded.add(track.video_id)
+        tracks.append(track)
+        if len(tracks) >= max(1, limit):
+            break
+    return tracks
 
 
 def parse_related_tracks(
@@ -231,20 +265,20 @@ def parse_related_tracks(
     exclude_ids: Iterable[str] = (),
     limit: int = 20,
 ) -> list[RadioTrack]:
-    """Extract usable videos from YouTube's changing related-video renderers."""
+    """Admit Music radio songs/videos; unknown and non-music rows fail closed."""
 
-    excluded = {str(item).strip() for item in exclude_ids}
-    tracks: list[RadioTrack] = []
-    for node in _renderer_nodes(payload):
-        video_id = _video_id(node)
-        title = _title(node)
-        if not video_id or not title or video_id in excluded:
-            continue
-        excluded.add(video_id)
-        tracks.append(RadioTrack(video_id, title, _first_thumbnail(node)))
-        if len(tracks) >= max(1, limit):
-            break
-    return tracks
+    return _parse_music_tracks(payload, search=False, exclude_ids=exclude_ids, limit=limit)
+
+
+def parse_music_search_tracks(
+    payload: object,
+    *,
+    exclude_ids: Iterable[str] = (),
+    limit: int = 20,
+) -> list[RadioTrack]:
+    """Apply the radio music policy to each fallback search row as well."""
+
+    return _parse_music_tracks(payload, search=True, exclude_ids=exclude_ids, limit=limit)
 
 
 def tracks_from_search_results(
